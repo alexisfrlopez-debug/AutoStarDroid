@@ -34,8 +34,8 @@ import {Pressable, Text, View, Vibration} from 'react-native';
 import {useT} from '../i18n';
 import {useSettingsStore} from '../store/settingsStore';
 import {autostar, type Dir} from '../services/protocol/client';
-import {handboxSync, SYNC_FAST_MS} from '../services/protocol/handboxSync';
-import {useScopeStore, HB_ERR_NO_POS} from '../store/scopeStore';
+import {handboxSync} from '../services/protocol/handboxSync';
+import {useScopeStore, type HbHint} from '../store/scopeStore';
 import {KEYMAPS, FW_SHORT, type KeyAct, type KeySpec} from '../services/protocol/keymaps';
 import {LcdPanel} from './LcdPanel';
 import {usePal} from './ui';
@@ -50,6 +50,12 @@ type Speed = 'guide' | 'center' | 'find' | 'slew';
 
 /** Retour automatique à l'écran miroir après ce délai sans touche (menus). */
 const MIRROR_RETURN_MS = 5000;
+
+/** Ligne 2 du LCD quand la synchro est live sans position exploitable. */
+const hintLcd = (hint: HbHint, t: {hb: {sync: Record<string, string>}}): string =>
+  hint === 'init' ? t.hb.sync.lcdInit :
+  hint === 'mute' ? t.hb.sync.lcdMute :
+  t.hb.sync.waitPos;
 
 /** Raccourcis vitesse des raquettes #494/#495/#497 (touches 1-9). */
 const DIGIT_SPEED: Record<number, Speed> = {
@@ -70,11 +76,11 @@ export function VirtualHandbox() {
   const speed = useScopeStore((s) => s.speed);
   const alignMode = useScopeStore((s) => s.alignMode);
   const hbSync = useScopeStore((s) => s.hbSync);
+  const hbHint = useScopeStore((s) => s.hbHint);
   const hbMoving = useScopeStore((s) => s.hbMoving);
   const hbExternal = useScopeStore((s) => s.hbExternal);
   const hbDirs = useScopeStore((s) => s.hbDirs);
   const hasPos = useScopeStore((s) => s.hasPos);
-  const hbError = useScopeStore((s) => s.hbError);
   const altDeg = useScopeStore((s) => s.altDeg);
   const azDeg = useScopeStore((s) => s.azDeg);
   const fwModel = useScopeStore((s) => s.fwModel);
@@ -331,14 +337,14 @@ export function VirtualHandbox() {
     feedback();
     if (!connected) {showMsg(t.errors.notConnected, 1500); return;}
     activeDirs.current.add(d);
-    autostar.markOwnMove(); // maintien virtuel ≠ mouvement physique
+    autostar.setVirtualHold(d, true); // maintien virtuel ≠ mouvement physique
     autostar.startMove(d).catch(() => undefined);
   };
   const dirStop = (d: Dir) => {
     if (!activeDirs.current.has(d)) return;
     activeDirs.current.delete(d);
     if (connected) {
-      autostar.markOwnMove(1500); // inertia : dernier delta encore à l'app
+      autostar.setVirtualHold(d, false); // libère l'attribution immédiatement
       autostar.stopMove(d).catch(() => undefined);
     }
   };
@@ -359,18 +365,18 @@ export function VirtualHandbox() {
     line1 = msg.slice(0, 16);
     line2 = msg.slice(16, 32);
   } else if (mirrorActive && !hasPos) {
-    // synchro live mais aucune position encore lue sur cette liaison :
-    // pas de faux « RA 00:00:00 » (les zéros initiaux ne sont pas la
-    // position de la raquette)
+    // synchro live mais pas encore de position utilisable :
+    // PAS de faux « RA 00:00:00 » — le diagnostic suit sous les pastilles
     line1 = 'SYNCHRO LIVE';
-    line2 = t.hb.sync.waitPos.slice(0, 16);
+    line2 = hintLcd(hbHint, t).slice(0, 16);
   } else if (mirrorActive) {
     // Écran d'observation synchronisé : identique à la raquette physique
     line1 = `RA ${raDegToHMS(raDeg)}`;
     line2 = `DEC ${decDegToDMS(decDeg)}`;
-  } else if (!cursor.length && connected && hbSync === 'error' && hasPos) {
-    // synchro interrompue : dernière position connue maintenue à l'écran
-    // (l'erreur est détaillée par la ligne rouge sous les pastilles)
+  } else if (!cursor.length && connected && hbSync === 'live' && hasPos) {
+    // aperçu menu terminé : dernière position connue maintenue à l'écran
+    // (le diagnostic éventuel est détaillé par la ligne rouge sous les
+    // pastilles)
     line1 = `RA ${raDegToHMS(raDeg)}`;
     line2 = `DEC ${decDegToDMS(decDeg)}`;
   } else if (!cursor.length) {
@@ -532,18 +538,7 @@ export function VirtualHandbox() {
           delayLongPress={600}
           style={({pressed}) => pillBox(pressed ? c.btnActive : 'rgba(63,214,140,0.12)', pressed ? c.amber : 'rgba(63,214,140,0.55)')}>
           <Text style={{color: c.green, fontSize: 10, fontWeight: '800', letterSpacing: 0.5}}>
-            ● {t.hb.sync.live} {SYNC_FAST_MS / 1000}s
-          </Text>
-        </Pressable>
-      );
-    }
-    if (hbSync === 'error') {
-      return (
-        <Pressable
-          onPress={() => {feedback(); handboxSync.restart();}}
-          style={({pressed}) => pillBox(pressed ? c.btnActive : 'rgba(255,93,93,0.12)', 'rgba(255,93,93,0.55)')}>
-          <Text style={{color: c.red, fontSize: 10, fontWeight: '800', letterSpacing: 0.5}}>
-            ⟳ {t.hb.sync.retry}
+            ● {t.hb.sync.live}
           </Text>
         </Pressable>
       );
@@ -556,6 +551,19 @@ export function VirtualHandbox() {
       </Pressable>
     );
   };
+
+  /** ⟳ RELANCER : visible quand la liaison répond mais que la position ne
+   *  vient pas (raquette (re)branchée, monture allumée en cours de route…) —
+   *  la synchro reste LIVE et se rétablit aussi toute seule. */
+  const RetryPill = () => (
+    <Pressable
+      onPress={() => {feedback(); handboxSync.restart(); showMsg(t.hb.sync.restarted, 2200);}}
+      style={({pressed}) => pillBox(pressed ? c.btnActive : 'rgba(255,93,93,0.12)', 'rgba(255,93,93,0.55)')}>
+      <Text style={{color: c.red, fontSize: 10, fontWeight: '800', letterSpacing: 0.5}}>
+        ⟳ {t.hb.sync.retry}
+      </Text>
+    </Pressable>
+  );
 
   /* ---------- Badge firmware (mappage auto du clavier) ---------- */
   const fwShort = FW_SHORT[model];
@@ -592,11 +600,18 @@ export function VirtualHandbox() {
           </View>
         ) : null}
         <SyncPill />
+        {connected && hbSync === 'live' && hbHint === 'mute' ? <RetryPill /> : null}
       </View>
-      {connected && hbSync === 'error' && hbError ? (
+      {connected && hbSync === 'live' && hbHint === 'mute' ? (
         <Text numberOfLines={3}
           style={{color: c.red, fontSize: 10, lineHeight: 14, textAlign: 'center', marginTop: 4}}>
-          {hbError === HB_ERR_NO_POS ? t.hb.sync.errNoPos : `${t.hb.sync.errGeneric}${hbError}`}
+          {t.hb.sync.errNoPos}
+        </Text>
+      ) : null}
+      {connected && hbSync === 'live' && hbHint === 'init' ? (
+        <Text numberOfLines={3}
+          style={{color: c.amber, fontSize: 10, lineHeight: 14, textAlign: 'center', marginTop: 4}}>
+          {t.hb.sync.errInit}
         </Text>
       ) : null}
       {fwLine ? (

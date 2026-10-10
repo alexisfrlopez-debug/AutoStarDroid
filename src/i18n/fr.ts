@@ -121,8 +121,10 @@ export const fr: Dict = {
       stopped: 'Synchro temps réel arrêtée', restarted: 'Synchro temps réel relancée',
       phys: 'PHYSIQUE',
       waitPos: 'Attente position…',
-      errGeneric: 'Synchro interrompue : ',
-      errNoPos: 'Liaison active mais la raquette ne renvoie aucune position AD/DEC. Vérifiez que la raquette est bien reliée à la monture, que celle-ci est sous tension, et que la raquette a terminé son initialisation (écran principal atteint).',
+      lcdMute: 'Position muette',
+      lcdInit: 'Non initialisée',
+      errNoPos: 'Liaison active mais la raquette ne renvoie aucune position AD/DEC. Vérifiez que la raquette est bien reliée à la monture, que celle-ci est sous tension, et que la raquette a terminé son initialisation (écran principal atteint). La synchro reste active : le miroir reprendra dès la première position.',
+      errInit: 'La raquette répond 00h00 / +00°00 : initialisation ou alignement non terminé. Terminez l\'alignement sur la raquette physique (ou « Config › Site » dans l\'app) — le miroir reprendra automatiquement.',
     },
     msgs: {
       noObject: 'Objet inaccessible', syncing: 'Envoi date/heure/site…',

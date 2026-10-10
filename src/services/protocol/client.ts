@@ -12,7 +12,7 @@ import {PROFILES, SPEED_CMDS} from './profiles';
 import {proto} from '../astro/time';
 import type {ScopeModelId} from '../../store/settingsStore';
 import {useSettingsStore} from '../../store/settingsStore';
-import {useScopeStore, HB_ERR_NO_POS} from '../../store/scopeStore';
+import {useScopeStore} from '../../store/scopeStore';
 
 export type Dir = 'n' | 's' | 'e' | 'w';
 export type Speed = keyof typeof SPEED_CMDS;
@@ -45,26 +45,36 @@ export function matchFirmware(product: string, version: string): ScopeModelId | 
 }
 
 // Longitudes Meade : +DDD*MM (3 chiffres) — latitudes : ±DD*MM
-const DEC_RE = /^([+-])(\d{1,3})\D(\d{1,2})/;
+// Signe optionnel : certaines versions renvoient "45*23" pour +45°23'.
+const DEC_RE = /^([+-])?(\d{1,3})\D(\d{1,2})/;
 
 function parseDec(s: string): number | null {
-  const m = s.match(DEC_RE);
+  const m = s.trim().match(DEC_RE);
   if (!m) return null;
   return (m[1] === '-' ? -1 : 1) * (+m[2] + +m[3] / 60);
 }
 
 function parseRa(s: string): number | null {
-  const m = s.match(/^(\d{1,2}):(\d{2}):(\d{2})/);
+  // "HH:MM:SS" (Autostar) ou "HH:MM.T" (LX200 classique, dixièmes de minute)
+  const m = s.match(/^(\d{1,2}):(\d{2})(?::(\d{2})|\.(\d))?/);
   if (!m) return null;
-  return (+m[1] + +m[2] / 60 + +m[3] / 3600) * 15;
+  const h = +m[1];
+  const mm = +m[2];
+  const sec = m[3] ? +m[3] / 3600 : m[4] ? +m[4] / 10 / 60 : 0;
+  return (h + mm / 60 + sec) * 15;
 }
 
 /**
  * Format attendu des réponses, par commande. Sert à rejeter une réponse
  * « en retard » d'une commande expirée (raquette occupée pendant un moteur)
- * qui sinon serait attribuée à la commande suivante et empoisonnerait la
- * synchro : une réponse qui ne colle pas au format attendu est jetée, la
- * vraie réponse qui suit est acceptée normalement.
+ * qui sinon serait attribuée à la commande suivante : une réponse hors
+ * format est jetée, la vraie réponse qui suit est acceptée normalement.
+ * IMPORTANT (v1.5.0) : le tampon série n'est PAS purgé entre deux commandes
+ * — une réponse qui arrive APRÈS son délai d'attente reste dans le tampon
+ * et sera consommée (rejetée ou acceptée) par la commande suivante. Purger
+ * détruisait ces réponses tardives et faisait échouer la synchro en boucle
+ * sur les raquettes qui répondent lentement (écran LCD en cours de
+ * rafraîchissement, bus moteur occupé).
  */
 const VALID = {
   ra: /^\d{1,2}:\d{2}/,          // :Gr# :GL#  → "HH:MM:SS" ou "HH:MM.T"
@@ -88,10 +98,20 @@ export class AutostarClient {
   private failCount = 0;
   private lastRaDeg: number | null = null;
   private lastDecDeg: number | null = null;
+  private lastPosAt = 0; // horodatage de la dernière lecture AD/DEC complète
+  private lastProbeAt = 0; // dernier diagnostic :GVP# (mode muet)
+  private muteLogged = false; // message « muette » déjà journalisé ?
   /** Fenêtre pendant laquelle un mouvement est attribué à L'APP (commandes
    *  :Mn…/:MS# qu'elle vient d'envoyer) — hors fenêtre, le mouvement constaté
    *  vient de la raquette physique. */
   private ownMoveUntil = 0;
+  /** Flèches VIRTUELLES tenues : pendant ce temps, tout mouvement est à
+   *  l'app, quelle que soit la fenêtre ownMoveUntil (fini les 30 s qui
+   *  masquaient les appuis sur la raquette physique). */
+  private holding = new Set<Dir>();
+  /** Jusqu'à quand les commandes UTILISATEUR passent avant le polling
+   *  (les ticks de poll sont sautés juste après une action utilisateur). */
+  private priorityUntil = 0;
   /** Dernier cycle où la position bougeait (tolérance : beaucoup de raquettes
    *  ne répondent pas au port série pendant un moteur). */
   private lastMovedFlag = false;
@@ -126,6 +146,7 @@ export class AutostarClient {
       s.setHbMoving(false);
       s.setHbExternal(false);
       s.setHbDirs(null);
+      s.setHbHint('none');
       s.pushLog('info', 'Liaison fermée');
       handboxSync.reset();
     });
@@ -199,11 +220,18 @@ export class AutostarClient {
     this.lastMovedFlag = false;
     this.lastExternalAt = 0;
     this.ownMoveUntil = 0;
+    this.holding.clear();
+    this.priorityUntil = 0;
+    this.lastPosAt = 0;
+    this.lastProbeAt = 0;
+    this.muteLogged = false;
+    this.failCount = 0;
     handboxSync.reset(); // purge synchro + état physique (mêmes IDs que onClosed)
     const s = useScopeStore.getState();
     s.setConnStatus('disconnected');
     s.setTransportType(null);
     s.setFirmware(null, null, null);
+    s.setHbHint('none');
   }
 
   /* ---------- couche basse ---------- */
@@ -236,7 +264,11 @@ export class AutostarClient {
     }
   }
 
-  /** Envoie une commande et attend une réponse '#'-terminée (format vérifié). */
+  /** Envoie une commande et attend une réponse '#'-terminée (format vérifié).
+   *  Le tampon n'est PAS purgé avant l'envoi : une réponse « en retard »
+   *  d'une commande expirée reste consommable par celle-ci (rejetée si hors
+   *  format, acceptée si elle colle — dans le pire cas une position vieille
+   *  de 1-2 s vaut mieux qu'aucune). */
   cmd(command: string, timeoutMs = 3000, expect?: RegExp): Promise<string> {
     if (!this.transport) return Promise.reject(new TransportError('Non connecté'));
     const run = () =>
@@ -244,11 +276,9 @@ export class AutostarClient {
         if (!this.transport) return reject(new TransportError('Non connecté'));
         const timer = setTimeout(() => {
           this.pending = null;
-          this.buffer = '';
           reject(new TransportError(`Délai dépassé : ${command}`));
         }, timeoutMs) as unknown as number;
         this.pending = {cmd: command, expect, resolve, reject, timer};
-        this.buffer = '';
         this.log('sent', command);
         this.transport.write(command).catch((e) => {
           clearTimeout(timer);
@@ -261,9 +291,11 @@ export class AutostarClient {
     return chained;
   }
 
-  /** Commande sans réponse attendue (mouvements…). */
+  /** Commande sans réponse attendue (mouvements, vitesse, focus…) —
+   *  toujours initiée par l'utilisateur : priorité sur le polling. */
   async cmdSilent(command: string): Promise<void> {
     if (!this.transport) throw new TransportError('Non connecté');
+    this.bump();
     this.log('sent', command);
     try {
       await this.transport.write(command);
@@ -286,6 +318,28 @@ export class AutostarClient {
     return {raDeg, decDeg};
   }
 
+  /**
+   * Lecture AD/DEC TOLÉRANTE pour le polling : chaque axe est indépendant
+   * (une raquette peut répondre à :Gr# mais tarder sur :Gd# — on garde
+   * l'axe lu au lieu de tout jeter). Renvoie null par axe si muet/illisible.
+   * Petite respiration (40 ms) entre les 2 commandes : le tampon UART des
+   * Autostar est minuscule, deux commandes collées peuvent perdre la 2e.
+   */
+  async readPosition(): Promise<{raDeg: number | null; decDeg: number | null}> {
+    let raDeg: number | null = null;
+    let decDeg: number | null = null;
+    try {
+      const ra = await this.cmd(':Gr#', 3000, VALID.ra);
+      raDeg = parseRa(ra);
+    } catch (_) { /* axe muet ce cycle */ }
+    await sleep(40);
+    try {
+      const dec = await this.cmd(':Gd#', 3000, VALID.dec);
+      decDeg = parseDec(dec);
+    } catch (_) { /* axe muet ce cycle */ }
+    return {raDeg, decDeg};
+  }
+
   async getFirmware(): Promise<{product: string; version: string}> {
     const product = await this.cmd(':GVP#').catch(() => '?');
     const version = await this.cmd(':GVN#').catch(() => '?');
@@ -298,30 +352,49 @@ export class AutostarClient {
 
   async startMove(dir: Dir) {
     const map: Record<Dir, string> = {n: ':Mn#', s: ':Ms#', e: ':Me#', w: ':Mw#'};
+    this.bump();
     await this.cmdSilent(map[dir]);
     this.ownMoveUntil = Date.now() + 2500; // mouvement attribué à l'app
   }
 
-  /** Marque le mouvement en cours comme initié par l'app (flèche virtuelle
-   *  tenue au-delà de la fenêtre de startMove — sinon il serait attribué à
-   *  la raquette physique). */
+  /** Marque le mouvement en cours comme initié par l'app (GOTO…). */
   markOwnMove(holdMs = 30000) {
     this.ownMoveUntil = Math.max(this.ownMoveUntil, Date.now() + holdMs);
   }
 
+  /** Flèche virtuelle tenue (dirStart) : le mouvement constaté est celui
+   *  ordonné par l'app tant que la flèche n'est pas relâchée. */
+  setVirtualHold(d: Dir, on: boolean) {
+    if (on) this.holding.add(d);
+    else {
+      this.holding.delete(d);
+      this.ownMoveUntil = Date.now() + 1500; // inertie : dernier delta à l'app
+    }
+  }
+
+  /** Priorité aux commandes utilisateur : les ticks de polling sont sautés
+   *  un court instant pour que l'appui soit exécuté sans attendre le cycle
+   *  de lecture en cours. */
+  private bump() {
+    this.priorityUntil = Date.now() + 700;
+  }
+
   async stopMove(dir: Dir) {
     const map: Record<Dir, string> = {n: ':Qn#', s: ':Qs#', e: ':Qe#', w: ':Qw#'};
+    this.bump();
     await this.cmdSilent(map[dir]);
     this.ownMoveUntil = Date.now() + 1200;
   }
 
   async stopAll() {
+    this.bump();
     await this.cmdSilent(':Q#');
     this.ownMoveUntil = Date.now() + 1200;
   }
 
   /** GOTO vers RA/Dec. Renvoie 'ok' ou un message d'erreur localisé. */
   async gotoRaDec(raDeg: number, decDeg: number): Promise<'ok' | 'belowHorizon' | 'noObject' | 'refused'> {
+    this.bump();
     const r1 = await this.cmd(`:Sr${proto.raCmd(raDeg)}#`, 3000, VALID.bit);
     const r2 = await this.cmd(`:Sd${proto.decCmd(decDeg)}#`, 3000, VALID.bit);
     if (r1 !== '1' || r2 !== '1') return 'refused';
@@ -336,10 +409,11 @@ export class AutostarClient {
     await this.cmdSilent(':CM#');
   }
 
-  /** Lecture date/heure/site de la raquette. */
+  /** Lecture date/heure/site de la raquette (commande utilisateur). */
   async readScopeData(): Promise<{
     time: string; date: string; tz: string; latDeg: number | null; lonDeg: number | null;
   }> {
+    this.bump();
     const [time, date, tz, lat, lon] = await Promise.all([
       this.cmd(':GL#', 3000, VALID.ra), this.cmd(':GC#', 3000, VALID.date),
       this.cmd(':GG#', 3000, VALID.tz),
@@ -353,6 +427,7 @@ export class AutostarClient {
    *  :SG/:SL/:SC/:St/:Sg RÉPONDENT ("1") — la réponse est consommée (et
    *  tolérée si muette) au lieu de rester dans le tampon série. */
   async pushPhoneData(latDeg: number, lonDeg: number): Promise<void> {
+    this.bump();
     const now = new Date();
     const tzOffsetMin = -now.getTimezoneOffset();
     // :SG accepte les heures décimales fractionnaires (ex. +05.5 pour l'Inde)
@@ -426,78 +501,125 @@ export class AutostarClient {
       // si le cycle précédent n'est pas terminé (raquette lente/muette), on
       // saute ce tick : aucune commande ne s'empile dans la file série
       if (this.pollBusy || !this.isConnected()) return;
+      // priorité aux commandes utilisateur : on laisse la main un instant
+      if (Date.now() < this.priorityUntil) return;
       this.pollBusy = true;
       try {
-        const {raDeg, decDeg} = await this.getRaDec(2500);
-        this.failCount = 0;
+        const {raDeg, decDeg} = await this.readPosition();
         const s = useScopeStore.getState();
-        // détection de mouvement : la position physique a bougé depuis le
-        // dernier cycle (seuil ~10" entre 2 lectures)
-        const moved = this.lastRaDeg !== null && this.lastDecDeg !== null &&
-          (Math.abs(raDeg - this.lastRaDeg) + Math.abs(decDeg - this.lastDecDeg)) > 0.0028;
-        // attribution : hors de la fenêtre « l'app vient d'ordonner un
-        // mouvement », tout déplacement constaté VIENT DE LA RAQUETTE
-        // PHYSIQUE → croix allumée + directions déduites des deltas AD/DEC
-        const external = moved && Date.now() > this.ownMoveUntil &&
-          this.lastRaDeg !== null && this.lastDecDeg !== null;
-        let dirs: {n: boolean; s: boolean; e: boolean; w: boolean} | null = null;
-        if (external) {
-          let dRa = raDeg - (this.lastRaDeg as number);
-          if (dRa > 180) dRa -= 360; else if (dRa < -180) dRa += 360; // raccord 0h
-          const dDec = decDeg - (this.lastDecDeg as number);
-          const th = 0.0014; // ~5" : moitié du seuil de mouvement
-          dirs = {n: dDec > th, s: dDec < -th, e: dRa > th, w: dRa < -th};
-          if (!dirs.n && !dirs.s && !dirs.e && !dirs.w) dirs = null;
-          this.lastExternalAt = Date.now();
-        }
-        s.setPosition(raDeg, decDeg);
-        s.setHbMoving(moved);
-        s.setHbExternal(external);
-        s.setHbDirs(dirs);
-        this.lastMovedFlag = moved;
-        this.lastRaDeg = raDeg;
-        this.lastDecDeg = decDeg;
-        this.pollTick += 1;
-        if (this.pollAltAzOn && this.pollTick % 4 === 0) {
-          this.pollAltAz().catch(() => undefined); // tolérant : modèles sans :Ga
-        }
-      } catch (e) {
-        // Pendant un moteur (slew de la raquette physique ou GOTO), beaucoup
-        // de raquettes cessent de répondre au port série : ce n'est PAS une
-        // panne de synchro — on tolère et on retente au tick suivant.
-        const busy = this.lastMovedFlag || Date.now() - this.lastExternalAt < 3000;
-        if (!busy) this.failCount += 1;
-        if (this.failCount >= 5) {
+        const now = Date.now();
+        if (raDeg === null && decDeg === null) {
+          // les 2 axes muets ce cycle — pendant un moteur c'est normal
+          // (beaucoup de raquettes cessent de répondre au port série)
+          const busy = this.lastMovedFlag || this.holding.size > 0 ||
+            now - this.lastExternalAt < 3000;
+          if (!busy) this.failCount += 1;
+          this.applyHint(s, now);
+        } else {
           this.failCount = 0;
-          const s = useScopeStore.getState();
-          if (s.hbSync === 'live') {
-            // DIAGNOSTIC : la liaison répond-elle encore à une requête
-            // statique (:GVP#) ? Oui → la raquette est muette sur la POSITION
-            // (monture non reliée/sous tension, ou raquette non initialisée —
-            // c'est le cas typique du test au bureau) ; non → liaison perdue.
-            let err = (e as Error).message;
-            try {
-              const p = await this.cmd(':GVP#', 2500);
-              if (p && p !== '?') {
-                err = HB_ERR_NO_POS;
-                s.pushLog('error', 'Synchro : liaison active mais aucune position AD/DEC renvoyée (monture reliée/initialisée ?)');
-              }
-            } catch (_) {
-              s.pushLog('error', 'Synchro : la raquette ne répond plus du tout');
+          this.lastPosAt = now;
+          // RA ou DEC lu mais pas l'autre : on conserve le dernier connu
+          const newRa = raDeg ?? this.lastRaDeg ?? 0;
+          const newDec = decDeg ?? this.lastDecDeg ?? 0;
+          // 00:00:00 / +00*00 = raquette non initialisée (alignement non
+          // terminé) : JAMAIS affiché comme une position — c'est l'état de
+          // repos de toutes les raquettes Meade avant alignement.
+          const init = newRa === 0 && newDec === 0;
+          // détection de mouvement : uniquement quand les 2 axes sont lus
+          // CE cycle (sinon un axe périmé fausserait les deltas). Seuil
+          // ADAPTATIF : au-dessus du suivi sidéral (15"/s × marge), donc
+          // proportionnel au temps écoulé entre 2 lectures.
+          let moved = false;
+          if (raDeg !== null && decDeg !== null && this.lastRaDeg !== null &&
+              this.lastDecDeg !== null) {
+            const el = Math.min(Math.max((now - this.lastPosAt) / 1000, 0.3), 6);
+            const th = Math.max(0.0028, el * 0.0076); // ~10" … 27"/s écoulés
+            moved = Math.abs(newRa - (this.lastRaDeg as number)) +
+              Math.abs(newDec - (this.lastDecDeg as number)) > th;
+          }
+          const appOwned = this.holding.size > 0 || now < this.ownMoveUntil;
+          // hors de la fenêtre « l'app vient d'ordonner un mouvement », tout
+          // déplacement constaté VIENT DE LA RAQUETTE PHYSIQUE → croix
+          // allumée + directions déduites des deltas AD/DEC
+          const external = moved && !appOwned &&
+            this.lastRaDeg !== null && this.lastDecDeg !== null;
+          let dirs: {n: boolean; s: boolean; e: boolean; w: boolean} | null = null;
+          if (external) {
+            let dRa = newRa - (this.lastRaDeg as number);
+            if (dRa > 180) dRa -= 360; else if (dRa < -180) dRa += 360; // raccord 0h
+            const dDec = newDec - (this.lastDecDeg as number);
+            const th = 0.0014; // ~5"
+            dirs = {n: dDec > th, s: dDec < -th, e: dRa > th, w: dRa < -th};
+            if (!dirs.n && !dirs.s && !dirs.e && !dirs.w) dirs = null;
+            this.lastExternalAt = now;
+          }
+          if (init) {
+            // pas de position : l'écran miroir reste en « attente », le
+            // diagnostic explique l'initialisation (la LIAISON, elle, marche)
+            s.setHbHint('init');
+            s.setHasPos(false);
+          } else {
+            s.setPosition(newRa, newDec);
+            s.setHbHint('none');
+            if (this.muteLogged) {
+              this.muteLogged = false;
+              s.pushLog('info', 'Synchro : position de nouveau lue — miroir rétabli');
             }
-            s.setHbSync('error');
-            s.setHbError(err);
-            s.setHbMoving(false);
-            s.setHbExternal(false);
-            s.setHbDirs(null);
-            this.setPollInterval(2000);
-            this.setPollAltAz(false);
+          }
+          s.setHbMoving(moved);
+          s.setHbExternal(external);
+          s.setHbDirs(dirs);
+          this.lastMovedFlag = moved;
+          this.lastRaDeg = init ? this.lastRaDeg : newRa;
+          this.lastDecDeg = init ? this.lastDecDeg : newDec;
+          this.pollTick += 1;
+          if (this.pollAltAzOn && this.pollTick % 4 === 0) {
+            this.pollAltAz().catch(() => undefined); // tolérant : modèles sans :Ga
           }
         }
+      } catch {
+        const s = useScopeStore.getState();
+        this.applyHint(s, Date.now());
       } finally {
         this.pollBusy = false;
       }
     }, this.pollIntervalMs) as unknown as number;
+  }
+
+  /** Diagnostic continu quand la position ne vient pas : 'wait' (bref),
+   *  puis 'mute' après ~6 s — la synchro RESTE LIVE, aucune retombée en
+   *  erreur : la sonde :GVP# distingue raquette muette sur la position
+   *  (monture non reliée/hors tension, raquette pas initialisée) et liaison
+   *  morte. La moindre position valide rétablit le miroir instantanément. */
+  private applyHint(s: ReturnType<typeof useScopeStore.getState>, now: number) {
+    if (!this.lastPosAt) {
+      s.setHbHint('wait'); // première position pas encore lue : bref et normal
+      return;
+    }
+    if (now - this.lastPosAt < 6000) return; // tolérance courte, pas d'alerte
+    if (s.hbHint !== 'mute') {
+      s.setHbHint('mute');
+      if (!this.muteLogged) {
+        this.muteLogged = true;
+        s.pushLog('info', 'Synchro LIVE maintenue : la raquette ne renvoie plus de position AD/DEC — sonde :GVP# en cours');
+      }
+    }
+    // sonde de liaison toutes les 10 s max (hors mouvement)
+    const busy = this.lastMovedFlag || this.holding.size > 0 ||
+      now - this.lastExternalAt < 3000;
+    if (!busy && now - this.lastProbeAt > 10000) {
+      this.lastProbeAt = now;
+      this.cmd(':GVP#', 2500)
+        .then((p) => {
+          if (p && p !== '?') {
+            useScopeStore.getState().pushLog('info',
+              'Sonde : liaison active, raquette muette sur la position (monture reliée/sous tension ? raquette initialisée ?)');
+          }
+        })
+        .catch(() => {
+          useScopeStore.getState().pushLog('info', 'Sonde : la raquette ne répond plus du tout (liaison interrompue ?)');
+        });
+    }
   }
 
   private async pollAltAz() {

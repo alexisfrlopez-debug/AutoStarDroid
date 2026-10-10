@@ -119,8 +119,10 @@ export const en = {
       stopped: 'Real-time sync stopped', restarted: 'Real-time sync restarted',
       phys: 'PHYSICAL',
       waitPos: 'Waiting for pos…',
-      errGeneric: 'Sync interrupted: ',
-      errNoPos: 'Link is alive but the handbox returns no RA/DEC position. Check that the handbox is connected to the mount, that the mount is powered on, and that the handbox finished booting (main screen reached).',
+      lcdMute: 'Position silent',
+      lcdInit: 'Not initialised',
+      errNoPos: 'Link is alive but the handbox returns no RA/DEC position. Check that the handbox is connected to the mount, that the mount is powered on, and that the handbox finished booting (main screen reached). The sync stays active: the mirror resumes with the first position.',
+      errInit: 'The handbox answers 00h00 / +00°00: initialisation or alignment not finished. Complete the alignment on the physical handbox (or "Setup › Site" in the app) — the mirror resumes automatically.',
     },
     msgs: {
       noObject: 'Object unreachable', syncing: 'Sending date/time/site…',

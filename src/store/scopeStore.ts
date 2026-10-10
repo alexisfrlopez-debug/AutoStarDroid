@@ -3,12 +3,19 @@ import type {ScopeModelId} from './settingsStore';
 import type {TransportType} from '../services/connection/types';
 
 export type ConnStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
-/** État de la synchronisation temps réel raquette virtuelle ↔ physique. */
-export type HbSyncStatus = 'off' | 'live' | 'error';
-/** Sentinelle de diagnostic : liaison active mais raquette muette sur la
- *  position (monture non reliée/sous tension ou raquette non initialisée).
- *  L'UI la traduit (i18n) au lieu d'afficher une erreur transport brute. */
-export const HB_ERR_NO_POS = 'NO_POSITION';
+/** État de la synchronisation temps réel raquette virtuelle ↔ physique.
+ *  PAS d'état « error » : une position absente n'interrompt JAMAIS la
+ *  synchro (v1.5.0) — c'est le champ hbHint qui porte le diagnostic. */
+export type HbSyncStatus = 'off' | 'live';
+/** Diagnostic continu du miroir (affiché sous les pastilles, i18n) :
+ *  - none  : tout va bien, position lue en continu ;
+ *  - wait  : synchro live, première position pas encore lue (bref) ;
+ *  - mute  : liaison active mais AUCUNE position AD/DEC renvoyée depuis
+ *            plusieurs secondes (raquette non reliée à la monture, monture
+ *            hors tension, ou raquette muette sur :Gr#/:Gd#) ;
+ *  - init  : la raquette répond 00:00:00 / +00*00 → non initialisée
+ *            (alignement non terminé sur la raquette physique). */
+export type HbHint = 'none' | 'wait' | 'mute' | 'init';
 
 export interface LogLine {
   ts: number;
@@ -36,7 +43,7 @@ interface ScopeState {
   speed: 'guide' | 'center' | 'find' | 'slew';
   alignMode: 'altaz' | 'polar' | 'land' | 'unknown';
   hbSync: HbSyncStatus; // synchro temps réel du LCD (voir handboxSync.ts)
-  hbError: string | null;
+  hbHint: HbHint; // diagnostic du miroir (position absente/nulle…)
   hbMoving: boolean; // la raquette physique est en train de bouger
   /** Mouvement VENU de la raquette physique (l'app ne bougeait pas elle-même). */
   hbExternal: boolean;
@@ -57,7 +64,7 @@ interface ScopeState {
   setSpeed: (s: ScopeState['speed']) => void;
   setAlignMode: (m: ScopeState['alignMode']) => void;
   setHbSync: (s: HbSyncStatus) => void;
-  setHbError: (e: string | null) => void;
+  setHbHint: (h: HbHint) => void;
   setHbMoving: (m: boolean) => void;
   setHbExternal: (x: boolean) => void;
   setHbDirs: (d: {n: boolean; s: boolean; e: boolean; w: boolean} | null) => void;
@@ -84,7 +91,7 @@ const initial = {
   speed: 'center' as ScopeState['speed'],
   alignMode: 'unknown' as ScopeState['alignMode'],
   hbSync: 'off' as HbSyncStatus,
-  hbError: null as string | null,
+  hbHint: 'none' as HbHint,
   hbMoving: false,
   hbExternal: false,
   hbDirs: null as ScopeState['hbDirs'],
@@ -108,7 +115,7 @@ export const useScopeStore = create<ScopeState>((set) => ({
   setSpeed: (speed) => set({speed}),
   setAlignMode: (alignMode) => set({alignMode}),
   setHbSync: (hbSync) => set({hbSync}),
-  setHbError: (hbError) => set({hbError}),
+  setHbHint: (hbHint) => set({hbHint}),
   setHbMoving: (hbMoving) => set({hbMoving}),
   setHbExternal: (hbExternal) => set({hbExternal}),
   setHbDirs: (hbDirs) => set({hbDirs}),

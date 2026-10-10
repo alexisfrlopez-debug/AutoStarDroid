@@ -2,29 +2,26 @@
  * handboxSync — synchronisation temps réel entre la raquette virtuelle et la
  * raquette physique.
  *
- * Quand la synchro est ACTIVE (« live ») :
- *  - la position AD/DEC est relue sur la raquette toutes les 500 ms et le LCD
- *    de la raquette virtuelle affiche en continu la même information que
+ * Quand la synchro est ACTIVE (« live », défaut dès la connexion) :
+ *  - la position AD/DEC est relue en continu (500 ms) et le LCD de la
+ *    raquette virtuelle affiche en permanence la même information que
  *    l'écran d'observation de la raquette physique ;
  *  - l'altitude/azimut est lue toutes les 2 s (:Ga/:Gz) ;
  *  - le mouvement de la raquette (slew physique ou suivi) est détecté et
- *    signalé (hbMoving).
+ *    signalé (croix allumée + pastille ● PHYSIQUE).
  *
- * Quand elle est DÉSACTIVÉE (« off »), le LCD reprend son menu local et le
- * polling repasse en mode fond (2 s) pour nourrir le reste de l'application.
+ * FIABILITÉ (v1.5.0) : la synchro NE TOMBE PLUS EN ERREUR quand la position
+ * ne vient pas. Tant qu'aucune position n'arrive, le LCD affiche
+ * « SYNCHRO LIVE / Attente position… » et le diagnostic (hbHint) explique
+ * quoi vérifier ; la moindre position valide rétablit le miroir
+ * instantanément — sans appui sur RELANCER, qui reste disponible :
+ *  - appui court sur la pastille LIVE : DÉSACTIVER la synchro ;
+ *  - appui long sur la pastille LIVE : RELANCER (flush + reprise).
  *
- * Si la raquette cesse de répondre (5 échecs consécutifs hors mouvement),
- * la synchro passe en « error » : un diagnostic est alors lancé (:GVP#) —
- * liaison vivante mais muette sur la position (monture non reliée/sous
- * tension ou raquette non initialisée) → message dédié ; liaison morte →
- * message transport. L'utilisateur peut relancer d'un appui sur le bouton
- * SYNCHRO de la raquette virtuelle, et l'erreur est affichée sous les
- * pastilles (elle n'était visible que dans le journal avant v1.4.1).
- *
- * Note matériel : le protocole série Meade (#49x/LX200) ne permet pas de lire
- * le contenu littéral du LCD de la raquette physique — la synchro reconstitue
- * donc fidèlement son écran d'observation (RA/DEC) à partir des télémétries
- * du protocole, mises à jour en temps réel.
+ * Note matériel : le protocole série Meade (#49x/LX200) ne permet pas de
+ * lire le contenu littéral du LCD de la raquette physique ni ses touches —
+ * la synchro reconstruit fidèlement son écran d'observation (RA/DEC, alt/az,
+ * mouvements) à partir des télémétries du protocole, en temps réel.
  */
 import {autostar} from './client';
 import {useScopeStore} from '../../store/scopeStore';
@@ -39,7 +36,7 @@ export const handboxSync = {
   enable(): boolean {
     const s = useScopeStore.getState();
     if (s.connStatus !== 'connected') return false;
-    s.setHbError(null);
+    s.setHbHint('none');
     s.setHbSync('live');
     autostar.setPollInterval(SYNC_FAST_MS);
     autostar.setPollAltAz(true);
@@ -51,6 +48,7 @@ export const handboxSync = {
   disable() {
     const s = useScopeStore.getState();
     s.setHbSync('off');
+    s.setHbHint('none');
     s.setHbMoving(false);
     s.setHbExternal(false);
     s.setHbDirs(null);
@@ -65,7 +63,8 @@ export const handboxSync = {
     else this.enable();
   },
 
-  /** Relance la synchro (après une erreur, ou pour rafraîchir la liaison). */
+  /** Relance la synchro : purge le diagnostic et repart en cadence rapide —
+   *  utile après une raquette (re)branchée ou mise sous tension. */
   restart() {
     this.disable();
     this.enable();
@@ -75,7 +74,7 @@ export const handboxSync = {
   reset() {
     const s = useScopeStore.getState();
     s.setHbSync('off');
-    s.setHbError(null);
+    s.setHbHint('none');
     s.setHbMoving(false);
     s.setHbExternal(false);
     s.setHbDirs(null);
