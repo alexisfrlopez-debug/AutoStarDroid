@@ -11,6 +11,7 @@ import {DemoTransport, setDemoSite} from '../connection/demo';
 import {PROFILES, SPEED_CMDS} from './profiles';
 import {proto} from '../astro/time';
 import type {ScopeModelId} from '../../store/settingsStore';
+import {useSettingsStore} from '../../store/settingsStore';
 import {useScopeStore} from '../../store/scopeStore';
 
 export type Dir = 'n' | 's' | 'e' | 'w';
@@ -125,21 +126,33 @@ export class AutostarClient {
   }
 
   /**
-   * Lit :GVP#/:GVN# puis sélectionne le mappage de clavier adapté au
-   * firmware détecté (voir keymaps.ts). Silencieux : une raquette muette
-   * ne doit jamais empêcher l'utilisation de l'app.
+   * Détection du firmware par la liaison établie dans l'onglet Connexion :
+   * lit :GVP#/:GVN# puis sélectionne automatiquement la configuration
+   * optimale — le modèle détecté pilote toute l'app (profil de capacités,
+   * menus, mappage du clavier, voir keymaps.ts) et remplace le choix manuel
+   * de l'onglet Connexion, qui reste la configuration de secours quand le
+   * firmware est muet ou méconnu. Le résultat est affiché dans l'onglet
+   * Connexion (carte « Micrologiciel détecté ») et journalisé. Silencieux :
+   * une raquette muette ne doit jamais empêcher l'utilisation de l'app.
    */
-  private async detectFirmware() {
+  async detectFirmware() {
     try {
       const {product, version} = await this.getFirmware();
       const model = matchFirmware(product, version);
       const s = useScopeStore.getState();
       s.setFirmware(product, version, model);
-      s.pushLog('info', model
-        ? `Firmware détecté : ${product} ${version} → clavier ${model} auto`
-        : `Firmware : ${product} ${version} — non reconnu, modèle Réglages conservé`);
+      if (model) {
+        // Configuration optimale : le modèle détecté est appliqué à toute
+        // l'app (capacités, menus, clavier) et sélectionné dans l'onglet
+        // Connexion à la place du choix de secours.
+        useSettingsStore.getState().setModel(model);
+        s.setModel(model);
+        s.pushLog('info', `Firmware détecté : ${product} ${version} → configuration ${model} appliquée`);
+      } else {
+        s.pushLog('info', `Firmware : ${product} ${version} — non reconnu, modèle de l'onglet Connexion conservé`);
+      }
     } catch {
-      useScopeStore.getState().pushLog('info', 'Firmware illisible — modèle Réglages conservé');
+      useScopeStore.getState().pushLog('info', 'Firmware illisible — modèle de l\'onglet Connexion conservé');
     }
   }
 

@@ -1,4 +1,4 @@
-/** Écran Connexion : modèle de raquette + 4 liaisons (Wi-Fi/BT/USB/Démo). */
+/** Écran Connexion : modèle + 4 liaisons (Wi-Fi/BT/USB/Démo) + détection du firmware. */
 import {useEffect, useState} from 'react';
 import {Platform, PermissionsAndroid, ScrollView, View, Text, TouchableOpacity} from 'react-native';
 import {useT} from '../i18n';
@@ -7,8 +7,12 @@ import {useScopeStore} from '../store/scopeStore';
 import {autostar} from '../services/protocol/client';
 import {UsbSerialNative, UsbDeviceInfo, BluetoothSppNative} from '../services/connection';
 import {PROFILES} from '../services/protocol/profiles';
+import {FW_SHORT} from '../services/protocol/keymaps';
 import {StatusHeader} from '../components/StatusHeader';
 import {Btn, Card, Input, Segmented, Title, usePal} from '../components/ui';
+
+/** Capacités affichées pour la configuration active (ordre du profil). */
+const CAP_KEYS = ['serial', 'setDateTime', 'setSite', 'alignCmds', 'focus', 'pec', 'home', 'gps'] as const;
 
 type TransportTab = 'wifi' | 'bluetooth' | 'usb' | 'demo';
 
@@ -44,14 +48,25 @@ export function ConnectScreen() {
   const transportType = useScopeStore((s) => s.transportType);
   const fwProduct = useScopeStore((s) => s.fwProduct);
   const fwVersion = useScopeStore((s) => s.fwVersion);
+  const fwModel = useScopeStore((s) => s.fwModel);
   const [tab, setTab] = useState<TransportTab>('wifi');
   const [host, setHost] = useState(lastWifi.host);
   const [port, setPort] = useState(String(lastWifi.port));
   const [btDevices, setBtDevices] = useState<Array<{name: string; address: string}>>([]);
   const [usbDevices, setUsbDevices] = useState<UsbDeviceInfo[]>([]);
   const [busy, setBusy] = useState(false);
+  const [fwDetecting, setFwDetecting] = useState(false);
   const [err, setErr] = useState('');
-  const fw = connStatus === 'connected' && fwProduct ? `${fwProduct} — v${fwVersion ?? '?'}` : '';
+  const connected = connStatus === 'connected';
+  /** Configuration active : firmware détecté en priorité, choix de l'onglet en secours. */
+  const activeModel: ScopeModelId = fwModel ?? model;
+
+  /** Re-lance la détection du firmware sur la liaison courante. */
+  const redetect = async () => {
+    setFwDetecting(true);
+    await autostar.detectFirmware();
+    setFwDetecting(false);
+  };
 
   useEffect(() => {
     if (tab === 'bluetooth') refreshBt();
@@ -107,7 +122,6 @@ export function ConnectScreen() {
     setBusy(false);
   };
 
-  const connected = connStatus === 'connected';
   const modelKeys: ScopeModelId[] = ['autostar2', 'autostar497', 'autostar495', 'autostar494', 'lx200'];
 
   return (
@@ -115,6 +129,9 @@ export function ConnectScreen() {
       <StatusHeader />
       <Card style={{marginTop: 8}}>
         <Title text={t.connect.model} />
+        <Text style={{color: c.textFaint, fontSize: 11, marginBottom: 6, lineHeight: 15}}>
+          {t.connect.modelHint}
+        </Text>
         {modelKeys.map((m) => {
           const p = PROFILES[m];
           return (
@@ -128,7 +145,20 @@ export function ConnectScreen() {
                 {model === m ? <View style={{width: 8, height: 8, borderRadius: 4, backgroundColor: c.amber}} /> : null}
               </View>
               <View style={{flex: 1}}>
-                <Text style={{color: c.text, fontSize: 15, fontWeight: '600'}}>{t.models[m]}</Text>
+                <View style={{flexDirection: 'row', alignItems: 'center'}}>
+                  <Text style={{color: c.text, fontSize: 15, fontWeight: '600'}}>{t.models[m]}</Text>
+                  {fwModel === m ? (
+                    <View style={{
+                      marginLeft: 8, borderRadius: 6, borderWidth: 1,
+                      backgroundColor: 'rgba(63,214,140,0.12)', borderColor: 'rgba(63,214,140,0.5)',
+                      paddingHorizontal: 6, paddingVertical: 1,
+                    }}>
+                      <Text style={{color: c.green, fontSize: 9, fontWeight: '800', letterSpacing: 0.6}}>
+                        {t.connect.fwAutoBadge}
+                      </Text>
+                    </View>
+                  ) : null}
+                </View>
                 <Text style={{color: c.textDim, fontSize: 11, marginTop: 1}}>{p.hints}</Text>
               </View>
             </TouchableOpacity>
@@ -225,12 +255,46 @@ export function ConnectScreen() {
           )}
         </View>
         {err ? <Text style={{color: c.red, marginTop: 8}}>{t.common.error} : {err}</Text> : null}
-        {fw ? (
-          <Text style={{color: c.textDim, marginTop: 8, fontSize: 12}}>
-            {t.connect.firmware} : {fw}
-          </Text>
-        ) : null}
       </Card>
+
+      {/* Micrologiciel détecté via la liaison → configuration optimale appliquée */}
+      {connected ? (
+        <Card style={{marginTop: 12}}>
+          <Title text={t.connect.fwTitle} />
+          {fwProduct ? (
+            <View>
+              <Text style={{color: c.text, fontSize: 15, fontWeight: '700', fontFamily: 'monospace'}}>
+                {fwProduct.trim()} — v{fwVersion ?? '?'}
+              </Text>
+              <Text style={{color: fwModel ? c.green : c.textDim, fontSize: 12, marginTop: 5, lineHeight: 17}}>
+                {fwModel
+                  ? t.connect.fwOptimal.replace('{0}', t.models[fwModel])
+                  : t.connect.fwFallback.replace('{0}', t.models[model])}
+              </Text>
+              <Text style={{
+                color: c.textFaint, fontSize: 10, marginTop: 12, marginBottom: 4,
+                textTransform: 'uppercase', letterSpacing: 0.8, fontWeight: '700',
+              }}>
+                {t.connect.fwConfig} : {FW_SHORT[activeModel]}
+              </Text>
+              <View style={{flexDirection: 'row', flexWrap: 'wrap'}}>
+                {CAP_KEYS.filter((k) => PROFILES[activeModel].supports[k]).map((k) => (
+                  <View key={k} style={{
+                    borderRadius: 8, borderWidth: 1, borderColor: c.border, backgroundColor: c.bgPanel2,
+                    paddingHorizontal: 8, paddingVertical: 3, marginRight: 6, marginBottom: 6,
+                  }}>
+                    <Text style={{color: c.textDim, fontSize: 10.5, fontWeight: '600'}}>{t.connect.caps[k]}</Text>
+                  </View>
+                ))}
+              </View>
+            </View>
+          ) : (
+            <Text style={{color: c.textDim, fontSize: 12, lineHeight: 17}}>{t.connect.fwNotRead}</Text>
+          )}
+          <Btn label={fwDetecting ? t.connect.fwDetecting : t.connect.fwRedetect}
+            onPress={redetect} disabled={fwDetecting} variant="ghost" style={{marginTop: 10}} />
+        </Card>
+      ) : null}
     </ScrollView>
   );
 }
