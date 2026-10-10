@@ -481,6 +481,13 @@ export class AutostarClient {
     await this.cmdSilent(':FQ#');
   }
 
+  /** Vitesse du moteur de mise au point (panneau ASU « Focus Speed ») :
+   *  commandes LX200 classiques :FS#/:FM#/:FF# — silencieuses : une raquette
+   *  qui ne les connaît pas les ignore sans erreur. */
+  async setFocusSpeed(s: 'slow' | 'medium' | 'fast') {
+    await this.cmdSilent(s === 'fast' ? ':FF#' : s === 'medium' ? ':FM#' : ':FS#');
+  }
+
   /** Réticule illuminé du LX200 classique : luminosité ± (:B+ / :B-). */
   async reticleAdjust(delta: 1 | -1) {
     await this.cmdSilent(delta > 0 ? ':B+#' : ':B-#');

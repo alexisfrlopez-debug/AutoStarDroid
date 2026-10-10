@@ -16,6 +16,9 @@ interface SettingsState {
   language: Lang;
   nightVision: boolean;
   keySounds: boolean;
+  /** Lecture vocale du LCD de la raquette virtuelle (« Speech Enable »
+   *  du Hand Control Panel d'AutostarSuite). */
+  speech: boolean;
   model: ScopeModelId;
   site: SiteInfo;
   lastWifi: {host: string; port: number};
@@ -27,6 +30,7 @@ interface SettingsState {
   setLanguage: (l: Lang) => void;
   setNightVision: (v: boolean) => void;
   setKeySounds: (v: boolean) => void;
+  setSpeech: (v: boolean) => void;
   setModel: (m: ScopeModelId) => void;
   setSite: (s: SiteInfo) => void;
   setLastWifi: (w: {host: string; port: number}) => void;
@@ -42,6 +46,7 @@ export const useSettingsStore = create<SettingsState>()(
       language: 'fr',
       nightVision: false,
       keySounds: false,
+      speech: false,
       model: 'autostar2',
       site: {name: 'Paris', latDeg: 48.8566, lonDeg: 2.3522, elevM: 35},
       lastWifi: {host: '192.168.4.1', port: 4030},
@@ -52,6 +57,7 @@ export const useSettingsStore = create<SettingsState>()(
       setLanguage: (language) => set({language}),
       setNightVision: (nightVision) => set({nightVision}),
       setKeySounds: (keySounds) => set({keySounds}),
+      setSpeech: (speech) => set({speech}),
       setModel: (model) => set({model}),
       setSite: (site) => set({site}),
       setLastWifi: (lastWifi) => set({lastWifi}),

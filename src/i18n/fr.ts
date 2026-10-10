@@ -134,6 +134,16 @@ export const fr: Dict = {
       unavailable: 'Indisponible sur cette raquette', reticle: 'Réticule : menu FOCUS',
       landmark: 'Repères : non stockés',
     },
+    /* Panneau « Hand Control » (Remote Handbox AutostarSuite, manuel chap. 7) */
+    treeTitle: 'Menu Autostar',
+    treeHint: 'accédez à une fonction en un appui',
+    treeGotoHint: 'touchez à nouveau pour pointer',
+    treeEmpty: '—',
+    slewRate: 'Vitesse (Slew Rate)',
+    focusPanel: 'Mise au point (maintenir)',
+    fsSlow: 'Lente', fsMedium: 'Moyenne', fsFast: 'Rapide',
+    speech: 'Voix — énonce l’écran de la raquette',
+    speechOn: 'Voix activée',
     menus: {
       object: 'Objet', setup: 'Config', guiding: 'Guide', util: 'Util.',
       site: 'Site', readScope: 'Lire raquette', telescope: 'Télescope',

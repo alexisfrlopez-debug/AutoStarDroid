@@ -32,6 +32,14 @@
  * ■ STOP apparaît pendant un mouvement. Le port série d'une raquette ne
  * transmettant pas ses touches de menu, les touches MODE/ENTER/défilement
  * pilotent le modèle de menus local, comme sur le matériel.
+ *
+ * PANNEAU « HAND CONTROL » (fonctionnalités du Remote Handbox d'ASU,
+ * manuel Meade chap. 7) : au-dessus du clavier se trouvent :
+ *  - l'ARBRE DU MENU Autostar repliable, cliquable — accéder à une fonction
+ *    en un seul appui (« fast and saves a lot of keystrokes ») ;
+ *  - le sélecteur SLEW RATE (Guide/Center/Find/Slew) ;
+ *  - la mise au point : FOCUS entrée/sortie (maintien) + vitesse :FS/:FM/:FF ;
+ *  - la VOIX (Speech Enable) : le contenu de l'écran est énoncé (TTS natif).
  */
 import {useEffect, useMemo, useRef, useState} from 'react';
 import {Pressable, Text, View, Vibration} from 'react-native';
@@ -39,10 +47,12 @@ import {useT} from '../i18n';
 import {useSettingsStore} from '../store/settingsStore';
 import {autostar, type Dir} from '../services/protocol/client';
 import {handboxSync} from '../services/protocol/handboxSync';
+import {tts} from '../services/phone/tts';
 import {useScopeStore, type HbHint} from '../store/scopeStore';
 import {KEYMAPS, FW_SHORT, type KeyAct, type KeySpec} from '../services/protocol/keymaps';
 import {LcdPanel} from './LcdPanel';
-import {usePal} from './ui';
+import {MenuTree} from './MenuTree';
+import {Segmented, Toggle, usePal} from './ui';
 import {
   buildMenuTree, nodeAt, findPath,
   type MenuNode, type TrackMode,
@@ -74,6 +84,8 @@ export function VirtualHandbox() {
   const settingsModel = useSettingsStore((s) => s.model);
   const nightVision = useSettingsStore((s) => s.nightVision);
   const keySounds = useSettingsStore((s) => s.keySounds);
+  const speech = useSettingsStore((s) => s.speech);
+  const lang = useSettingsStore((s) => s.language);
   const connStatus = useScopeStore((s) => s.connStatus);
   const raDeg = useScopeStore((s) => s.raDeg);
   const decDeg = useScopeStore((s) => s.decDeg);
@@ -101,6 +113,9 @@ export function VirtualHandbox() {
   const [input, setInput] = useState('');
   const [msg, setMsg] = useState('');
   const [posView, setPosView] = useState<'radec' | 'altaz'>('radec');
+  /** Panneau ASU : arbre des menus dépliable + vitesse du focaliseur. */
+  const [treeOpen, setTreeOpen] = useState(false);
+  const [focusSpeed, setFocusSpeed] = useState<'slow' | 'medium' | 'fast'>('medium');
   /** Aperçu temporaire des menus locaux quand la synchro est LIVE : sans
    *  touche pendant 5 s, l'écran miroir (AD/DEC de la raquette physique)
    *  reprend la main, pour que les 2 affichages restent identiques. */
@@ -270,6 +285,39 @@ export function VirtualHandbox() {
     enter();
   };
 
+  /* ---------- Arbre de menus (panneau « AutoStar Menu » d'ASU) ---------- */
+  const lastTreeLeaf = useRef({id: '', at: 0});
+  const treeSelect = (path: number[]) => {
+    const node = nodeAt(root, path);
+    armOverlay();
+    setInput('');
+    setMsg('');
+    setCursor(path); // le LCD suit : comme un défilement sur la raquette
+    if (node.children?.length) return; // groupe : dépliage géré par l'arbre
+    if (node.onEnter) {feedback(); node.onEnter(); return;}
+    if (node.onGoto) {
+      // Feuille objet : 1er appui = sélection + rappel, 2e appui = GO TO
+      // (évite un slew accidentel — ASU : « click on the terminal item »)
+      const id = path.join('.');
+      const now = Date.now();
+      if (lastTreeLeaf.current.id === id && now - lastTreeLeaf.current.at < 4000) {
+        feedback();
+        node.onGoto();
+        lastTreeLeaf.current = {id: '', at: 0};
+      } else {
+        lastTreeLeaf.current = {id, at: now};
+        showMsg(`${node.line1.slice(0, 13)} — ${t.hb.treeGotoHint}`, 3500);
+      }
+    }
+  };
+
+  /* ---------- Voix (Speech Enable — panneau ASU) ---------- */
+  const toggleSpeech = (v: boolean) => {
+    useSettingsStore.getState().setSpeech(v);
+    if (v) showMsg(t.hb.speechOn, 2000);
+    else tts.stop();
+  };
+
   /** Touche SPEED du LX200 classique : cycle Guide→Center→Find→Slew. */
   const SPEED_ORDER: Speed[] = ['guide', 'center', 'find', 'slew'];
   const cycleSpeed = () => {
@@ -429,6 +477,19 @@ export function VirtualHandbox() {
     : mirrorActive
       ? mirrorPrefix + (posView === 'altaz' ? altAzText : raDecText)
       : cursor.length ? ctxLine : (posView === 'altaz' ? altAzText : raDecText);
+
+  /* ---------- Voix du LCD : énonce l'écran (Speech Enable ASU) ---------- */
+  useEffect(() => {
+    if (!speech) {tts.stop(); return;}
+    const id = setTimeout(() => {
+      const clean = (x: string) =>
+        x.replace(/[»▲▼▶◀●■⟳>·—]/g, ' ').replace(/\s+/g, ' ').trim();
+      const txt = `${clean(line1)}. ${clean(line2)}`;
+      if (clean(txt).length > 1) tts.speak(txt, lang);
+    }, 500);
+    return () => clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [line1, line2, speech, lang]);
 
   /* ---------- Composants de touches ---------- */
   const CmdKey = ({label, onPress, onLongPress}: {label: string; onPress: () => void; onLongPress?: () => void}) => (
@@ -648,6 +709,75 @@ export function VirtualHandbox() {
           {fwLine}
         </Text>
       ) : null}
+
+      {/* ——— Panneau ASU : AutoStar Menu (arbre cliquable) ——— */}
+      <Pressable
+        onPress={() => {feedback(); setTreeOpen(!treeOpen);}}
+        style={({pressed}) => ({
+          flexDirection: 'row', alignItems: 'center', marginTop: 12,
+          paddingVertical: 9, paddingHorizontal: 10,
+          borderRadius: 10, borderWidth: 1, borderColor: c.border,
+          backgroundColor: pressed ? c.bgPanel2 : c.btnBg,
+        })}>
+        <Text style={{color: c.amber, fontSize: 12, fontWeight: '800', width: 14}}>
+          {treeOpen ? '▾' : '▸'}
+        </Text>
+        <Text style={{flex: 1, color: c.textDim, fontSize: 11, fontWeight: '800', letterSpacing: 1}}>
+          {t.hb.treeTitle.toUpperCase()}
+        </Text>
+        <Text style={{color: c.textFaint, fontSize: 9}} numberOfLines={1}>
+          {t.hb.treeHint}
+        </Text>
+      </Pressable>
+      {treeOpen ? (
+        <View style={{marginTop: 6}}>
+          <MenuTree root={root} cursor={cursor} onSelect={treeSelect} />
+        </View>
+      ) : null}
+
+      {/* ——— Panneau ASU : Slew Rate ——— */}
+      <Text style={{color: c.textDim, fontSize: 11, fontWeight: '800', letterSpacing: 1, marginTop: 12, marginBottom: 5}}>
+        {t.hb.slewRate.toUpperCase()}
+      </Text>
+      <Segmented<Speed>
+        options={[
+          {key: 'guide', label: t.slew.guide},
+          {key: 'center', label: t.slew.center},
+          {key: 'find', label: t.slew.find},
+          {key: 'slew', label: t.slew.slew},
+        ]}
+        value={speed}
+        onChange={applySpeed}
+      />
+
+      {/* ——— Panneau ASU : Focus In/Out (maintien) + Focus Speed ——— */}
+      <Text style={{color: c.textDim, fontSize: 11, fontWeight: '800', letterSpacing: 1, marginTop: 12, marginBottom: 5}}>
+        {t.hb.focusPanel.toUpperCase()}
+      </Text>
+      <View style={{flexDirection: 'row'}}>
+        <HoldKey label={t.hb.menus.focusIn} inward={true} />
+        <HoldKey label={t.hb.menus.focusOut} inward={false} />
+      </View>
+      <View style={{marginTop: 6}}>
+        <Segmented<'slow' | 'medium' | 'fast'>
+          options={[
+            {key: 'slow', label: t.hb.fsSlow},
+            {key: 'medium', label: t.hb.fsMedium},
+            {key: 'fast', label: t.hb.fsFast},
+          ]}
+          value={focusSpeed}
+          onChange={(v) => {
+            feedback();
+            setFocusSpeed(v);
+            if (connected) autostar.setFocusSpeed(v).catch(() => undefined);
+          }}
+        />
+      </View>
+
+      {/* ——— Panneau ASU : Speech Enable (le LCD est énoncé) ——— */}
+      <View style={{marginTop: 10}}>
+        <Toggle value={speech} onChange={toggleSpeech} label={t.hb.speech} />
+      </View>
 
       {/* Clavier — rangées issues du mappage du firmware détecté */}
       {keymap.rows.map((row, ri) => (

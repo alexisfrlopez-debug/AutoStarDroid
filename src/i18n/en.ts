@@ -132,6 +132,16 @@ export const en = {
       unavailable: 'Not available on this handbox', reticle: 'Reticle: see FOCUS menu',
       landmark: 'Landmarks: not stored',
     },
+    /* « Hand Control » panel (AutostarSuite Remote Handbox, manual chap. 7) */
+    treeTitle: 'Autostar menu',
+    treeHint: 'one-tap access to any function',
+    treeGotoHint: 'tap again to slew',
+    treeEmpty: '—',
+    slewRate: 'Slew Rate',
+    focusPanel: 'Focus (hold)',
+    fsSlow: 'Slow', fsMedium: 'Medium', fsFast: 'Fast',
+    speech: 'Speech — reads the handbox display',
+    speechOn: 'Speech on',
     menus: {
       object: 'Object', setup: 'Setup', guiding: 'Guide', util: 'Util.',
       site: 'Site', readScope: 'Read handbox', telescope: 'Telescope',

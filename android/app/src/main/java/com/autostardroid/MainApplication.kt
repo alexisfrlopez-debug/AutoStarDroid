@@ -3,6 +3,7 @@ package com.autostardroid
 import android.app.Application
 import com.autostardroid.bt.BluetoothSppPackage
 import com.autostardroid.sensors.SensorsPackage
+import com.autostardroid.tts.TtsPackage
 import com.autostardroid.usb.UsbSerialPackage
 import com.facebook.react.PackageList
 import com.facebook.react.ReactApplication
@@ -23,6 +24,7 @@ class MainApplication : Application(), ReactApplication {
               add(UsbSerialPackage())
               add(BluetoothSppPackage())
               add(SensorsPackage())
+              add(TtsPackage())
             }
 
         override fun getJSMainModuleName(): String = "index"
