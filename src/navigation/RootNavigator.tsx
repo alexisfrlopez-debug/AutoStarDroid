@@ -43,6 +43,8 @@ function MainTabs() {
         options={{tabBarLabel: t.tabs.objects, tabBarIcon: ({color, focused}) => <TabIcon glyph="✦" focused={focused} color={color} />}} />
       <Tabs.Screen name="Align" component={AlignScreen}
         options={{tabBarLabel: t.tabs.align, tabBarIcon: ({color, focused}) => <TabIcon glyph="◎" focused={focused} color={color} />}} />
+      <Tabs.Screen name="Handbox" component={HandboxScreen}
+        options={{tabBarLabel: t.tabs.handbox, tabBarIcon: ({color, focused}) => <TabIcon glyph="▤" focused={focused} color={color} />}} />
       <Tabs.Screen name="Setup" component={SetupScreen}
         options={{tabBarLabel: t.tabs.setup, tabBarIcon: ({color, focused}) => <TabIcon glyph="⚙" focused={focused} color={color} />}} />
     </Tabs.Navigator>
@@ -70,7 +72,6 @@ export function RootNavigator() {
       <Stack.Navigator screenOptions={{headerShown: false, animation: 'slide_from_right'}}>
         <Stack.Screen name="Home" component={MainTabs} />
         <Stack.Screen name="Connect" component={ConnectScreen} />
-        <Stack.Screen name="Handbox" component={HandboxScreen} />
         <Stack.Screen name="Console" component={ConsoleScreen} />
       </Stack.Navigator>
     </NavigationContainer>

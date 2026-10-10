@@ -22,6 +22,8 @@ interface SettingsState {
   lastBtAddress: string;
   lastUsbDevice: string;
   onlyAboveHorizon: boolean;
+  /** Déclinaison magnétique du site (Est positif, ex. +2° en France). */
+  declinationDeg: number;
   setLanguage: (l: Lang) => void;
   setNightVision: (v: boolean) => void;
   setKeySounds: (v: boolean) => void;
@@ -31,6 +33,7 @@ interface SettingsState {
   setLastBtAddress: (a: string) => void;
   setLastUsbDevice: (d: string) => void;
   setOnlyAboveHorizon: (v: boolean) => void;
+  setDeclinationDeg: (d: number) => void;
 }
 
 export const useSettingsStore = create<SettingsState>()(
@@ -45,6 +48,7 @@ export const useSettingsStore = create<SettingsState>()(
       lastBtAddress: '',
       lastUsbDevice: '',
       onlyAboveHorizon: true,
+      declinationDeg: 0,
       setLanguage: (language) => set({language}),
       setNightVision: (nightVision) => set({nightVision}),
       setKeySounds: (keySounds) => set({keySounds}),
@@ -54,6 +58,7 @@ export const useSettingsStore = create<SettingsState>()(
       setLastBtAddress: (lastBtAddress) => set({lastBtAddress}),
       setLastUsbDevice: (lastUsbDevice) => set({lastUsbDevice}),
       setOnlyAboveHorizon: (onlyAboveHorizon) => set({onlyAboveHorizon}),
+      setDeclinationDeg: (declinationDeg) => set({declinationDeg}),
     }),
     {
       name: 'autostardroid-settings',
