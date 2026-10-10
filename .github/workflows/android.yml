@@ -8,6 +8,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: write   # nécessaire pour attacher l'APK aux Releases (tags)
+
 jobs:
   build:
     runs-on: ubuntu-latest
