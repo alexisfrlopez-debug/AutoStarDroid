@@ -1,4 +1,4 @@
-/** Navigation racine : onglets bas + écrans empilés (Connexion, Raquette, Console). */
+/** Navigation racine : onglets bas (Raquette = interface unique du matériel). */
 import {NavigationContainer, DefaultTheme} from '@react-navigation/native';
 import {createNativeStackNavigator} from '@react-navigation/native-stack';
 import {createBottomTabNavigator} from '@react-navigation/bottom-tabs';
@@ -7,7 +7,6 @@ import {useT} from '../i18n';
 import {useSettingsStore} from '../store/settingsStore';
 import {theme} from '../theme/colors';
 import {MainScreen} from '../screens/MainScreen';
-import {SlewScreen} from '../screens/SlewScreen';
 import {ObjectScreen} from '../screens/ObjectScreen';
 import {AlignScreen} from '../screens/AlignScreen';
 import {SetupScreen} from '../screens/SetupScreen';
@@ -37,8 +36,6 @@ function MainTabs() {
       }}>
       <Tabs.Screen name="Main" component={MainScreen}
         options={{tabBarLabel: t.tabs.main, tabBarIcon: ({color, focused}) => <TabIcon glyph="◈" focused={focused} color={color} />}} />
-      <Tabs.Screen name="Slew" component={SlewScreen}
-        options={{tabBarLabel: t.tabs.slew, tabBarIcon: ({color, focused}) => <TabIcon glyph="✥" focused={focused} color={color} />}} />
       <Tabs.Screen name="Objects" component={ObjectScreen}
         options={{tabBarLabel: t.tabs.objects, tabBarIcon: ({color, focused}) => <TabIcon glyph="✦" focused={focused} color={color} />}} />
       <Tabs.Screen name="Align" component={AlignScreen}

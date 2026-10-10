@@ -12,11 +12,12 @@ Application React Native (TypeScript) — package `com.autostardroid` — Androi
 |---|---|
 | **Liaisons** | Wi-Fi TCP (IP + port, ponts type StarGPS/Meade Wi-Fi), Bluetooth SPP (HC-05/06, cordon BT Meade), **USB-série** (câble Meade #505/#507, FTDI, Prolific PL2303, SiLabs CP210x, WCH CH340 via OTG), **mode Démo** (Autostar II entièrement simulé) |
 | **Modèles** | Autostar II #497 (LX200GPS/RMS), Autostar #497 (ETX/LX90), #495, #494, LX200 classique — profils de commandes adaptés, séquence ESC ESC automatique pour les #49x |
-| **Visserie** | Pad directionnel N/S/E/O (maintenir = bouger), 4 vitesses Guide/Center/Find/Slew (`:RG/:RC/:RM/:RS`), mise au point `:F±` |
+| **Clavier auto** | Le firmware de la raquette est détecté à la connexion (`:GVP#`/`:GVN#`) et le clavier de la raquette virtuelle **s'organise et se mappe automatiquement** : rangées, étiquettes secondaires, comportement des chiffres et touches dédiées (LX200 : MODE/ENTER/PREV/NEXT, FOCUS maintenues, RÉTICULE, SPEED) |
+| **Raquette** | Interface unique du matériel (remplace l'ancien onglet « Visserie ») : pad directionnel N/S/E/O (maintenir = bouger), 4 vitesses Guide/Center/Find/Slew (`:RG/:RC/:RM/:RS`), mise au point `:F±`, pilule ■ STOP pendant un mouvement, pilule SYNCHRO |
 | **GoTo** | Catalogues **Messier (110 objets)**, **NGC célèbres (79)**, **95 étoiles nommées**, **planètes calculées** (éphémérides basse précision, Soleil→Neptune), **Tour du ciel** trié par hauteur, recherche globale |
 | **Alignement** | Modes Alt-Az / Polaire / Terrestre (`:AA/:AP/:AL`), parcours guidé Easy/Une étoile/Deux étoiles avec SYNC (`:CM`) |
 | **Sync téléphone → raquette** | Envoi automatique date (`:SC`), heure (`:SL`), fuseau (`:SG`), latitude (`:St`) et longitude (`:Sg`) depuis le GPS et l'horloge du téléphone — réglage demandé par ScopeBoss mais absent de beaucoup d'apps |
-| **Raquette virtuelle** | Réplique fidèle du clavier **Autostar #497 / Autostar II** : LCD 2×16 synchronisé en **temps réel** avec la raquette physique (AD/DEC 500 ms, Alt/Az, indicateur de mouvement, bouton SYNCHRO activer/désactiver/relancer), rangée ENTER/MODE/GO TO, croix directionnelle (maintien = slew `:M`/`:Q`), pavé numérique 1-9/0 avec étiquettes Autostar II (SPEED/CALD/M/FOCUS/SS/STAR/RET/LC./NGC/LIGHT), touches de défilement + aide `?`, menus arborescents (Objet/Config/Guide/Util.) reliés au protocole, saisie chiffrée type « M45 + ENTER », appui long MODE = accueil |
+| **Raquette virtuelle** | LCD 2×16 synchronisé en **temps réel** avec la raquette physique (AD/DEC 500 ms, Alt/Az, indicateur de mouvement, bouton SYNCHRO activer/désactiver/relancer), clavier reconstruit d'après le firmware détecté (voir **Clavier auto**), menus arborescents (Objet/Config/Guide/Util.) reliés au protocole, saisie chiffrée type « M45 + ENTER », appui long MODE = accueil |
 | **Mise en station** | Aides au calage équatorial par les capteurs du téléphone : **niveau à bulle** (accéléromètre), **inclinomètre de l'axe horaire** vs latitude du site, **boussole + visée Polaris** (azimut vrai, déclinaison magnétique réglable), **site GPS** (acquisition + envoi date/heure/site à la raquette) |
 | **Console** | Journal du trafic série temps réel (commandes envoyées/reçues) |
 | **Langue** | Bilingue français / anglais, commutable dans Réglages |
@@ -88,12 +89,12 @@ python3 scripts/validate_catalogs.py  # contre-vérification indépendante
 ```
 src/
   services/connection/   Transports : TCP, Bluetooth SPP, USB-série, Démo (+ base64 Hermes)
-  services/protocol/     Client Meade/LX200 (queue série, écho, ESC ESC), profils, télescope simulé
+  services/protocol/     Client Meade/LX200 (queue série, écho, ESC ESC), profils, mappages de clavier par firmware, télescope simulé
   services/astro/        Jour julien, TSL, RA/Dec↔Alt/Az, éphémérides planétaires (Schlyter)
   services/catalog/      Messier 110, NGC 79, étoiles 95 (OpenNGC/HYG, vérifiées <0.1°)
   services/phone/        GPS du téléphone (permissions gérées)
   store/                 Zustand persistant (réglages, état télescope)
-  screens/               Connect, Main, Slew, Objects, Align, Setup, Handbox, Console
+  screens/               Connect, Main, Objects, Align, Setup, Handbox, Console
   i18n/                  fr.ts / en.ts
 android/ .../usb/        Module natif Kotlin (usb-serial-for-android, JitPack)
 android/ .../bt/         Module natif Kotlin SPP (UUID 00001101-…)

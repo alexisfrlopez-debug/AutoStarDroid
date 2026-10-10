@@ -42,6 +42,8 @@ export function ConnectScreen() {
 
   const connStatus = useScopeStore((s) => s.connStatus);
   const transportType = useScopeStore((s) => s.transportType);
+  const fwProduct = useScopeStore((s) => s.fwProduct);
+  const fwVersion = useScopeStore((s) => s.fwVersion);
   const [tab, setTab] = useState<TransportTab>('wifi');
   const [host, setHost] = useState(lastWifi.host);
   const [port, setPort] = useState(String(lastWifi.port));
@@ -49,7 +51,7 @@ export function ConnectScreen() {
   const [usbDevices, setUsbDevices] = useState<UsbDeviceInfo[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
-  const [fw, setFw] = useState('');
+  const fw = connStatus === 'connected' && fwProduct ? `${fwProduct} — v${fwVersion ?? '?'}` : '';
 
   useEffect(() => {
     if (tab === 'bluetooth') refreshBt();
@@ -83,7 +85,6 @@ export function ConnectScreen() {
     }
     setBusy(true);
     setErr('');
-    setFw('');
     try {
       const opts =
         tab === 'wifi' ? {wifi: {host: host.trim(), port: parseInt(port, 10) || 4030}} :
@@ -92,10 +93,7 @@ export function ConnectScreen() {
         {demo: {}};
       await autostar.connect(tab, opts, model);
       if (tab === 'wifi') setLastWifi({host: host.trim(), port: parseInt(port, 10) || 4030});
-      try {
-        const f = await autostar.getFirmware();
-        setFw(`${f.product} — v${f.version}`);
-      } catch (_) {}
+      // firmware : lu en arrière-plan par autostar.detectFirmware() → store
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -106,7 +104,6 @@ export function ConnectScreen() {
   const doDisconnect = async () => {
     setBusy(true);
     await autostar.disconnect();
-    setFw('');
     setBusy(false);
   };
 

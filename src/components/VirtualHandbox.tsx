@@ -1,26 +1,29 @@
 /**
- * Raquette virtuelle — réplique fidèle du clavier Autostar #497 / Autostar II :
+ * Raquette virtuelle — clavier reconstruit automatiquement selon le
+ * firmware détecté (voir services/protocol/keymaps.ts) :
+ *
+ *   À la connexion, l'app interroge :GVP#/:GVN# ; le firmware reconnu
+ *   sélectionne le mappage (Autostar #497/#495/#494, Autostar II ou
+ *   LX200 classique) : composition des rangées, étiquettes secondaires,
+ *   comportement des chiffres et touches dédiées (FOCUS/RÉTICULE/SPEED
+ *   du LX200) s'adaptent sans réglage. Si le firmware est muet ou
+ *   inconnu, le modèle choisi dans Connexion/Réglages est conservé.
  *
  *   [ LCD 2×16 ]              <- LcdPanel, alimenté par le modèle de menus
- *   [ENTER][MODE][GO TO]      <- rangée de commandes (ordre physique)
- *         ▲                    <- croix directionnelle : maintien = slew
- *      ◀     ▶                    (:Mn/:Ms/:Me/:Mw, relâcher = :Q…)
- *         ▼
- *   [1 S][2 C][3 M]           <- pavé numérique ; étiquettes secondaires de
- *   [4 F][5 SS][6 ST]            l'Autostar II (SPEED/CALD/M/FOCUS/SS/STAR/
- *   [7 R][8 LC][9 N]             RET/LC/NGC) affichées selon le modèle choisi
- *        [0 ☀]
- *   [▲SC][ ? ][▼SC]           <- défilement des menus + aide contextuelle
+ *   [badge FW + SYNCHRO]      <- état du firmware + synchro temps réel
+ *   …rangées du mappage…      <- ENTER/MODE/GO TO, croix, pavé 0-9,
+ *                                défilement + ? (ou clavier LX200)
  *
- * Synchronisation temps réel avec la raquette réelle : quand elle est ACTIVE
- * (par défaut à la connexion), le LCD affiche en continu le même écran
- * d'observation que la raquette physique (AD/DEC relues toutes les 500 ms,
- * alt/az toutes les 2 s, indicateur de mouvement) ; le bouton SYNCHRO sous
- * l'écran permet de la désactiver (retour au menu local) ou de la relancer
- * (appui long quand LIVE, appui direct quand elle est en erreur). Les touches
- * de navigation (MENU/ENTER/MODE/défilement) pilotent le modèle de menus
- * local, comme sur le matériel — le port série d'une raquette ne transmet
- * pas ces touches.
+ * Synchronisation temps réel avec la raquette réelle : quand elle est
+ * ACTIVE (par défaut à la connexion), le LCD affiche en continu le même
+ * écran d'observation que la raquette physique (AD/DEC relues toutes les
+ * 500 ms, alt/az toutes les 2 s, indicateur de mouvement) ; le bouton
+ * SYNCHRO sous l'écran permet de la désactiver (retour au menu local) ou
+ * de la relancer (appui long quand LIVE, appui direct quand elle est en
+ * erreur). Une pilule ■ STOP apparaît pendant un mouvement. Les touches
+ * de navigation (MODE/ENTER/défilement) pilotent le modèle de menus
+ * local, comme sur le matériel — le port série d'une raquette ne
+ * transmet pas ces touches.
  */
 import {useEffect, useMemo, useRef, useState} from 'react';
 import {Pressable, Text, View, Vibration} from 'react-native';
@@ -29,6 +32,7 @@ import {useSettingsStore} from '../store/settingsStore';
 import {useScopeStore} from '../store/scopeStore';
 import {autostar, type Dir} from '../services/protocol/client';
 import {handboxSync, SYNC_FAST_MS} from '../services/protocol/handboxSync';
+import {KEYMAPS, FW_SHORT, type KeyAct, type KeySpec} from '../services/protocol/keymaps';
 import {LcdPanel} from './LcdPanel';
 import {usePal} from './ui';
 import {
@@ -50,7 +54,7 @@ export function VirtualHandbox() {
   const t = useT();
   const c = usePal();
   const site = useSettingsStore((s) => s.site);
-  const model = useSettingsStore((s) => s.model);
+  const settingsModel = useSettingsStore((s) => s.model);
   const nightVision = useSettingsStore((s) => s.nightVision);
   const keySounds = useSettingsStore((s) => s.keySounds);
   const connStatus = useScopeStore((s) => s.connStatus);
@@ -62,6 +66,14 @@ export function VirtualHandbox() {
   const hbMoving = useScopeStore((s) => s.hbMoving);
   const altDeg = useScopeStore((s) => s.altDeg);
   const azDeg = useScopeStore((s) => s.azDeg);
+  const fwModel = useScopeStore((s) => s.fwModel);
+  const fwProduct = useScopeStore((s) => s.fwProduct);
+  const fwVersion = useScopeStore((s) => s.fwVersion);
+
+  /** Modèle actif : firmware détecté en priorité, modèle réglé en secours. */
+  const model = fwModel ?? settingsModel;
+  const keymap = KEYMAPS[model];
+  const digitMode = keymap.digitMode;
 
   const [cursor, setCursor] = useState<number[]>([]);
   const [input, setInput] = useState('');
@@ -189,6 +201,24 @@ export function VirtualHandbox() {
     showMsg(t.hb.msgs.selectTarget);
   };
 
+  /** ENTER du LX200 classique : valider ET pointer l'objet sélectionné. */
+  const enterGoto = () => {
+    if (input) {jumpToInput(true); return;}
+    if (!cursor.length) {showMsg(t.hb.msgs.selectTarget); return;}
+    if (!selected.children?.length && selected.onGoto) {selected.onGoto(); return;}
+    enter();
+  };
+
+  /** Touche SPEED du LX200 classique : cycle Guide→Center→Find→Slew. */
+  const SPEED_ORDER: Speed[] = ['guide', 'center', 'find', 'slew'];
+  const cycleSpeed = () => {
+    const cur = useScopeStore.getState().speed;
+    const next = SPEED_ORDER[(SPEED_ORDER.indexOf(cur) + 1) % SPEED_ORDER.length];
+    applySpeed(next);
+    const label = {guide: t.slew.guide, center: t.slew.center, find: t.slew.find, slew: t.slew.slew}[next];
+    showMsg(`${t.slew.speed}: ${label}`, 1800);
+  };
+
   /** Saisie de chiffres : saut direct à l'item n de la liste affichée. */
   const jumpToInput = (thenGoto: boolean) => {
     const n = parseInt(input, 10);
@@ -208,16 +238,15 @@ export function VirtualHandbox() {
     if (input.length < 3) setInput(input + String(d));
   };
 
-  /** Étiquettes secondaires (Autostar II / LX200) et raccourcis vitesse (#49x). */
+  /** Étiquettes secondaires et raccourcis selon le mappage du firmware. */
   const nonDigitAction = (d: number) => {
-    const dual = model === 'autostar2' || model === 'lx200';
     if (d === 0) {
       const nv = !nightVision;
       useSettingsStore.getState().setNightVision(nv);
       showMsg(nv ? t.hb.msgs.nightOn : t.hb.msgs.nightOff, 2000);
       return;
     }
-    if (dual) {
+    if (digitMode === 'menuJumps') {
       const jump = (key: string) => {
         const p = findPath(root, key);
         if (p) {setCursor([...p, 0]); return true;}
@@ -234,7 +263,7 @@ export function VirtualHandbox() {
         case 8: showMsg(t.hb.msgs.landmark); return;      // LC.
         case 9: jump('ngc'); return;                      // NGC
       }
-    } else {
+    } else if (digitMode === 'speedShortcuts') {
       const s = DIGIT_SPEED[d];
       if (s) {
         applySpeed(s);
@@ -242,6 +271,8 @@ export function VirtualHandbox() {
         showMsg(`${t.slew.speed}: ${label}`, 2000);
       }
     }
+    // 'plain' (LX200 classique) : hors liste, les chiffres ne font rien —
+    // comme sur le handpad d'origine.
   };
 
   const help = () => {
@@ -335,13 +366,79 @@ export function VirtualHandbox() {
     </Pressable>
   );
 
-  const dual = model === 'autostar2' || model === 'lx200';
+  /* ---------- Rendu du mappage (keymaps.ts) ---------- */
+  const keyLabel = (k: {label?: string; labelKey: string}) =>
+    k.label ?? ((t.hb.keys as Record<string, string>)[k.labelKey] ?? k.labelKey);
 
-  /* ---------- Bouton de synchronisation temps réel ---------- */
+  const runAct = (a: KeyAct, label: string) => {
+    switch (a) {
+      case 'enter': enter(); break;
+      case 'enterGoto': enterGoto(); break;
+      case 'mode': mode(); break;
+      case 'goto': gotoKey(); break;
+      case 'help': help(); break;
+      case 'scrollUp': scroll(-1); break;
+      case 'scrollDown': scroll(1); break;
+      case 'speedCycle': cycleSpeed(); break;
+      case 'reticlePlus': case 'reticleMinus':
+        if (!connected) {showMsg(t.errors.notConnected, 1500); return;}
+        autostar.reticleAdjust(a === 'reticlePlus' ? 1 : -1).catch(() => undefined);
+        showMsg(label, 1200);
+        break;
+      default: break;
+    }
+  };
+
+  /** Touches FOCUS : maintien = moteur, relâcher = stop (:F± / :FQ). */
+  const HoldKey = ({label, inward}: {label: string; inward: boolean}) => (
+    <Pressable
+      onPressIn={() => {
+        feedback();
+        if (!connected) {showMsg(t.errors.notConnected, 1500); return;}
+        autostar.focusStart(inward).catch(() => undefined);
+      }}
+      onPressOut={() => {if (connected) autostar.focusStop().catch(() => undefined);}}
+      style={({pressed}) => ({
+        flex: 1, height: 46, borderRadius: 10, justifyContent: 'center', alignItems: 'center',
+        backgroundColor: pressed ? c.btnActive : c.btnBg, borderWidth: 1, borderColor: pressed ? c.amber : c.border, marginHorizontal: 3,
+      })}>
+      <Text style={{color: c.amber, fontWeight: '800', fontSize: 12, letterSpacing: 0.5}}>{label}</Text>
+    </Pressable>
+  );
+
+  const renderKey = (k: KeySpec, key: string) => {
+    switch (k.t) {
+      case 'gap': return <View key={key} style={{flex: 1}} />;
+      case 'spacer': return <View key={key} style={{width: k.w}} />;
+      case 'dir': return <ArrowKey key={key} d={k.dir} label={k.label} />;
+      case 'digit': return <NumKey key={key} digit={k.digit} sub={k.sub} />;
+      case 'act': {
+        const label = keyLabel(k);
+        if (k.act === 'focusIn') return <HoldKey key={key} label={label} inward />;
+        if (k.act === 'focusOut') return <HoldKey key={key} label={label} inward={false} />;
+        return (
+          <CmdKey key={key} label={label} onPress={() => runAct(k.act, label)}
+            onLongPress={k.act === 'mode' ? modeRoot : undefined} />
+        );
+      }
+      default: return null;
+    }
+  };
+
+  /* ---------- Boutons de synchro temps réel et d'arrêt d'urgence ---------- */
   const pillBox = (bg: string, border: string) => ({
     height: 26, borderRadius: 13, justifyContent: 'center' as const, alignItems: 'center' as const,
     backgroundColor: bg, borderWidth: 1, borderColor: border, paddingHorizontal: 10, marginLeft: 8,
   });
+
+  /** ■ STOP : coupe tout mouvement (:Q#) — visible uniquement en mouvement. */
+  const StopPill = () => (
+    <Pressable
+      onPress={() => {feedback(); autostar.stopAll().catch(() => undefined); showMsg(t.common.stop, 1200);}}
+      style={({pressed}) => pillBox(pressed ? c.btnActive : 'rgba(255,93,93,0.12)', 'rgba(255,93,93,0.55)')}>
+      <Text style={{color: c.red, fontSize: 10, fontWeight: '800', letterSpacing: 0.5}}>■ {t.common.stop}</Text>
+    </Pressable>
+  );
   const SyncPill = () => {
     if (!connected) {
       return (
@@ -383,6 +480,20 @@ export function VirtualHandbox() {
     );
   };
 
+  /* ---------- Badge firmware (mappage auto du clavier) ---------- */
+  const fwShort = FW_SHORT[model];
+  let fwLine: string | null = null;
+  if (connected) {
+    const prod = (fwProduct ?? '').trim();
+    if (prod && prod !== '?') {
+      fwLine = fwModel
+        ? t.hb.fw.detected.replace('{0}', prod).replace('{1}', fwVersion ?? '?').replace('{2}', fwShort)
+        : t.hb.fw.fallback.replace('{0}', prod).replace('{1}', fwVersion ?? '?').replace('{2}', fwShort);
+    } else {
+      fwLine = t.hb.fw.unknown.replace('{2}', fwShort);
+    }
+  }
+
   return (
     <View>
       {/* LCD + état live de la raquette réelle */}
@@ -395,55 +506,29 @@ export function VirtualHandbox() {
             {statusText}
           </Text>
         </Pressable>
+        {connected && hbMoving ? <StopPill /> : null}
         <SyncPill />
       </View>
+      {fwLine ? (
+        <Text numberOfLines={1}
+          style={{color: c.textFaint, fontSize: 9.5, textAlign: 'center', marginTop: 4, letterSpacing: 0.3}}>
+          {fwLine}
+        </Text>
+      ) : null}
 
-      {/* Rangée de commandes — ordre physique : ENTER MODE GO TO */}
-      <View style={{flexDirection: 'row', marginTop: 10}}>
-        <CmdKey label={t.hb.keys.enter} onPress={enter} />
-        <CmdKey label={t.hb.keys.mode} onPress={mode} onLongPress={modeRoot} />
-        <CmdKey label={t.hb.keys.goto} onPress={gotoKey} />
-      </View>
-
-      {/* Croix directionnelle */}
-      <View style={{alignItems: 'center', marginTop: 12, marginBottom: 4}}>
-        <ArrowKey d="n" label="▲" />
-        <View style={{flexDirection: 'row', alignItems: 'center', marginVertical: 4}}>
-          <ArrowKey d="w" label="◀" />
-          <View style={{width: 18}} />
-          <ArrowKey d="e" label="▶" />
+      {/* Clavier — rangées issues du mappage du firmware détecté */}
+      {keymap.rows.map((row, ri) => (
+        <View
+          key={`${model}-${ri}`}
+          style={{
+            flexDirection: 'row',
+            marginTop: ri === 0 ? 10 : (row.center ? 8 : 2),
+            justifyContent: row.center ? 'center' : 'flex-start',
+            alignItems: row.center ? 'center' : 'stretch',
+          }}>
+          {row.keys.map((k, ki) => renderKey(k, `${ki}`))}
         </View>
-        <ArrowKey d="s" label="▼" />
-      </View>
-
-      {/* Pavé numérique + étiquettes secondaires */}
-      <View style={{flexDirection: 'row'}}>
-        <NumKey digit={1} sub={dual ? 'SPEED' : undefined} />
-        <NumKey digit={2} sub={dual ? 'CALD' : undefined} />
-        <NumKey digit={3} sub={dual ? 'M' : undefined} />
-      </View>
-      <View style={{flexDirection: 'row'}}>
-        <NumKey digit={4} sub={dual ? 'FOCUS' : undefined} />
-        <NumKey digit={5} sub={dual ? 'SS' : undefined} />
-        <NumKey digit={6} sub={dual ? 'STAR' : undefined} />
-      </View>
-      <View style={{flexDirection: 'row'}}>
-        <NumKey digit={7} sub={dual ? 'RET' : undefined} />
-        <NumKey digit={8} sub={dual ? 'LC.' : undefined} />
-        <NumKey digit={9} sub={dual ? 'NGC' : undefined} />
-      </View>
-      <View style={{flexDirection: 'row'}}>
-        <View style={{flex: 1}} />
-        <NumKey digit={0} sub="LIGHT" />
-        <View style={{flex: 1}} />
-      </View>
-
-      {/* Défilement + aide — comme sous l'écran du matériel */}
-      <View style={{flexDirection: 'row', marginTop: 6}}>
-        <CmdKey label="▲" onPress={() => scroll(-1)} />
-        <CmdKey label={t.hb.keys.help} onPress={help} />
-        <CmdKey label="▼" onPress={() => scroll(1)} />
-      </View>
+      ))}
 
       <Text style={{color: c.textFaint, fontSize: 10, textAlign: 'center', marginTop: 10, lineHeight: 15}}>
         {t.hb.keypadHelp}

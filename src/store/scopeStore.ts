@@ -16,6 +16,10 @@ interface ScopeState {
   connStatus: ConnStatus;
   transportType: TransportType | null;
   model: ScopeModelId | null;
+  /** Firmware détecté à la connexion (:GVP#/:GVN#) — pilote le mappage du clavier. */
+  fwProduct: string | null;
+  fwVersion: string | null;
+  fwModel: ScopeModelId | null;
   raDeg: number; // position courante AD (deg)
   decDeg: number; // position courante DEC (deg)
   targetRaDeg: number | null;
@@ -34,6 +38,7 @@ interface ScopeState {
   setConnStatus: (s: ConnStatus) => void;
   setTransportType: (t: TransportType | null) => void;
   setModel: (m: ScopeModelId | null) => void;
+  setFirmware: (product: string | null, version: string | null, model: ScopeModelId | null) => void;
   setPosition: (raDeg: number, decDeg: number) => void;
   setTarget: (raDeg: number, decDeg: number, name: string) => void;
   setSpeed: (s: ScopeState['speed']) => void;
@@ -52,6 +57,9 @@ const initial = {
   connStatus: 'disconnected' as ConnStatus,
   transportType: null,
   model: null,
+  fwProduct: null as string | null,
+  fwVersion: null as string | null,
+  fwModel: null as ScopeModelId | null,
   raDeg: 0,
   decDeg: 0,
   targetRaDeg: null as number | null,
@@ -74,6 +82,7 @@ export const useScopeStore = create<ScopeState>((set) => ({
   setConnStatus: (connStatus) => set({connStatus}),
   setTransportType: (transportType) => set({transportType}),
   setModel: (model) => set({model}),
+  setFirmware: (fwProduct, fwVersion, fwModel) => set({fwProduct, fwVersion, fwModel}),
   setPosition: (raDeg, decDeg) => set({raDeg, decDeg}),
   setTarget: (targetRaDeg, targetDecDeg, targetName) =>
     set({targetRaDeg, targetDecDeg, targetName}),

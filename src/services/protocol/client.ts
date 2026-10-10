@@ -18,6 +18,31 @@ export type Speed = keyof typeof SPEED_CMDS;
 
 export interface RaDec {raDeg: number; decDeg: number}
 
+/**
+ * Devine la génération de raquette d'après la réponse :GVP#/:GVN#.
+ * Renvoie null si rien ne permet de trancher (l'app garde alors le modèle
+ * choisi dans Réglages). Ordre des tests : du plus spécifique au plus large.
+ */
+export function matchFirmware(product: string, version: string): ScopeModelId | null {
+  const p = (product ?? '').trim().toLowerCase();
+  if (!p || p === '?') return null;
+  if (/autostar\s*ii|autostar-?ii/.test(p)) return 'autostar2';
+  // LX200GPS/RCX400/RMS : raquette de type Autostar II (firmware 4x/5x)
+  if (/gps|rcx|rms|starlock/.test(p)) return 'autostar2';
+  if (/lx-?200|magellan/.test(p)) return 'lx200';
+  if (/autostar|#?49[457]|etx|lx90/.test(p)) {
+    // mentions explicites du numéro (#494/#495/#497) — ponts ou démo
+    if (/494/.test(p)) return 'autostar494';
+    if (/495/.test(p)) return 'autostar495';
+    if (/497/.test(p)) return 'autostar497';
+    const maj = parseInt((version ?? '').trim()[0] ?? '', 10);
+    // #497 : versions 4x+ (43E1, 52Eg…) — #495 : versions plus anciennes
+    if (!Number.isNaN(maj) && maj >= 4) return 'autostar497';
+    return 'autostar495';
+  }
+  return null;
+}
+
 // Longitudes Meade : +DDD*MM (3 chiffres) — latitudes : ±DD*MM
 const DEC_RE = /^([+-])(\d{1,3})\D(\d{1,2})/;
 
@@ -60,7 +85,7 @@ export class AutostarClient {
     switch (type) {
       case 'bluetooth': transport = new BluetoothTransport(); break;
       case 'usb': transport = new UsbTransport(); break;
-      case 'demo': transport = new DemoTransport(); break;
+      case 'demo': transport = new DemoTransport(model); break;
       default: transport = new TcpTransport(); break;
     }
     transport.onData((chunk) => this.onData(chunk));
@@ -69,8 +94,10 @@ export class AutostarClient {
     });
     transport.onClosed(() => {
       this.stopPoll();
-      useScopeStore.getState().setConnStatus('disconnected');
-      useScopeStore.getState().pushLog('info', 'Liaison fermée');
+      const s = useScopeStore.getState();
+      s.setConnStatus('disconnected');
+      s.setFirmware(null, null, null);
+      s.pushLog('info', 'Liaison fermée');
       handboxSync.reset();
     });
     try {
@@ -94,6 +121,26 @@ export class AutostarClient {
     if (transport.type === 'demo') setDemoSite(0, 0); // site ajusté par les écrans
     this.startPoll();
     handboxSync.enable(); // synchro temps réel par défaut dès la connexion
+    this.detectFirmware(); // mappage du clavier auto — asynchrone, non bloquant
+  }
+
+  /**
+   * Lit :GVP#/:GVN# puis sélectionne le mappage de clavier adapté au
+   * firmware détecté (voir keymaps.ts). Silencieux : une raquette muette
+   * ne doit jamais empêcher l'utilisation de l'app.
+   */
+  private async detectFirmware() {
+    try {
+      const {product, version} = await this.getFirmware();
+      const model = matchFirmware(product, version);
+      const s = useScopeStore.getState();
+      s.setFirmware(product, version, model);
+      s.pushLog('info', model
+        ? `Firmware détecté : ${product} ${version} → clavier ${model} auto`
+        : `Firmware : ${product} ${version} — non reconnu, modèle Réglages conservé`);
+    } catch {
+      useScopeStore.getState().pushLog('info', 'Firmware illisible — modèle Réglages conservé');
+    }
   }
 
   async disconnect(): Promise<void> {
@@ -109,6 +156,7 @@ export class AutostarClient {
     const s = useScopeStore.getState();
     s.setConnStatus('disconnected');
     s.setTransportType(null);
+    s.setFirmware(null, null, null);
   }
 
   /* ---------- couche basse ---------- */
@@ -272,6 +320,11 @@ export class AutostarClient {
   }
   async focusStop() {
     await this.cmdSilent(':FQ#');
+  }
+
+  /** Réticule illuminé du LX200 classique : luminosité ± (:B+ / :B-). */
+  async reticleAdjust(delta: 1 | -1) {
+    await this.cmdSilent(delta > 0 ? ':B+#' : ':B-#');
   }
 
   async park() {

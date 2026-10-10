@@ -3,7 +3,7 @@ import type {Dict} from './en';
 
 export const fr: Dict = {
   appName: 'AutoStar Droid',
-  tabs: {main: 'Principal', slew: 'Visserie', objects: 'Objets', align: 'Alignem.', setup: 'Réglages', handbox: 'Raquette', connect: 'Connexion', console: 'Console'},
+  tabs: {main: 'Principal', objects: 'Objets', align: 'Alignem.', setup: 'Réglages', handbox: 'Raquette', connect: 'Connexion', console: 'Console'},
   common: {
     ok: 'OK', cancel: 'Annuler', close: 'Fermer', save: 'Enregistrer', retry: 'Réessayer',
     connected: 'Connecté', disconnected: 'Déconnecté', connecting: 'Connexion…',
@@ -50,11 +50,7 @@ export const fr: Dict = {
     quickHelp: 'Utilisez les onglets ci-dessous pour piloter le télescope.',
   },
   slew: {
-    title: 'Visserie',
     speed: 'Vitesse', guide: 'Guide', center: 'Centrer', find: 'Cherch.', slew: 'Slew',
-    holdHint: 'Maintenez un bouton directionnel pour bouger, relâchez pour stopper',
-    focus: 'Mise au point', focusIn: 'Entrée', focusOut: 'Sortie', focusStop: 'Stop map.',
-    stopAll: 'TOUT STOPPER', customRate: 'Vitesses personnalisées (°/s)',
   },
   objects: {
     title: 'Objets', search: 'Rechercher (nom, M, NGC…)',
@@ -75,7 +71,7 @@ export const fr: Dict = {
     setMode: 'Appliquer le mode',
     flow: {
       pick: 'Choisissez une étoile au-dessus de 20° de hauteur :',
-      goto: 'Centrez {star} dans l’oculaire avec l’onglet Visserie, puis :',
+      goto: 'Centrez {star} dans l’oculaire avec la croix de la raquette virtuelle, puis :',
       confirm: 'Confirmer l’alignement (SYNC)',
       done: 'Alignement synchronisé sur {star}.',
       centerFirst: 'Centrer la 1ʳᵉ étoile', centerSecond: 'Centrer la 2ᵉ étoile',
@@ -99,9 +95,14 @@ export const fr: Dict = {
   hb: {
     title: 'Raquette',
     tabKeypad: 'Raquette', tabStation: 'Mise en station',
-    keypadHelp: 'Flèches : maintenir pour pointer · ▲▼ défilement · MODE appui long = accueil · chiffres = vitesse / n° de liste',
+    keypadHelp: 'Flèches : maintenir pour pointer · touches de commande : défilement des menus · MODE appui long = accueil · chiffres = saisie / raccourcis',
     helpGeneric: 'AutoStar Droid — touche ? pour l’aide de chaque item',
     keys: {mode: 'MODE', enter: 'ENTER', goto: 'GO TO', help: '?'},
+    fw: {
+      detected: 'FW {0} v{1} — clavier {2} (auto)',
+      fallback: 'FW {0} v{1} — non reconnu, clavier {2}',
+      unknown: 'FW non détecté — clavier {2} (modèle réglé)',
+    },
     sync: {
       na: 'SYNCHRO —', off: 'SYNCHRO OFF', live: 'LIVE', retry: 'RELANCER',
       stopped: 'Synchro temps réel arrêtée', restarted: 'Synchro temps réel relancée',
@@ -134,7 +135,7 @@ export const fr: Dict = {
     helpTour: '12 meilleurs objets au-dessus de l’horizon',
     helpSpeed: 'ENTER : appliquer la vitesse (Guide/Centrer/Cherch./Slew)',
     helpTrack: 'ENTER : appliquer le suivi (Alt-Az/Polaire/Terrestre)',
-    helpFocus: 'GO TO : moteur 2,5 s — onglet Visserie pour le réglage fin',
+    helpFocus: 'GO TO : moteur 2,5 s — handpad LX200 : touches MAP maintenues',
     helpFocusIn: 'GO TO : mise au point entrante 2,5 s',
     helpFocusOut: 'GO TO : mise au point sortante 2,5 s',
     helpFocusStop: 'GO TO : arrêter le moteur de map.',

@@ -1,7 +1,7 @@
 // English strings
 export const en = {
   appName: 'AutoStar Droid',
-  tabs: {main: 'Main', slew: 'Slew', objects: 'Objects', align: 'Align', setup: 'Setup', handbox: 'Handbox', connect: 'Connect', console: 'Console'},
+  tabs: {main: 'Main', objects: 'Objects', align: 'Align', setup: 'Setup', handbox: 'Handbox', connect: 'Connect', console: 'Console'},
   common: {
     ok: 'OK', cancel: 'Cancel', close: 'Close', save: 'Save', retry: 'Retry',
     connected: 'Connected', disconnected: 'Disconnected', connecting: 'Connecting…',
@@ -48,11 +48,7 @@ export const en = {
     quickHelp: 'Use the tabs below to drive the scope.',
   },
   slew: {
-    title: 'Slew',
     speed: 'Speed', guide: 'Guide', center: 'Center', find: 'Find', slew: 'Slew',
-    holdHint: 'Hold a direction button to move, release to stop',
-    focus: 'Focus', focusIn: 'In', focusOut: 'Out', focusStop: 'Stop focus',
-    stopAll: 'STOP ALL', customRate: 'Custom rates (°/s)',
   },
   objects: {
     title: 'Objects', search: 'Search (name, M, NGC…)',
@@ -73,7 +69,7 @@ export const en = {
     setMode: 'Apply mode',
     flow: {
       pick: 'Pick a star above 20° altitude:',
-      goto: 'Center {star} in the eyepiece using the Slew tab, then:',
+      goto: 'Center {star} in the eyepiece with the virtual handbox arrow keys, then:',
       confirm: 'Confirm alignment (SYNC)',
       done: 'Alignment synced on {star}.',
       centerFirst: 'Center first star', centerSecond: 'Center second star',
@@ -97,9 +93,14 @@ export const en = {
   hb: {
     title: 'Handbox',
     tabKeypad: 'Handbox', tabStation: 'Polar align',
-    keypadHelp: 'Arrows: hold to slew · ▲▼ scroll menus · MODE long-press = top · digits = speed / list index',
+    keypadHelp: 'Arrows: hold to slew · command keys scroll menus · MODE long-press = top · digits = entry / shortcuts',
     helpGeneric: 'Autostar Droid — press ? on any item for help',
     keys: {mode: 'MODE', enter: 'ENTER', goto: 'GO TO', help: '?'},
+    fw: {
+      detected: 'FW {0} v{1} — keypad {2} (auto)',
+      fallback: 'FW {0} v{1} — unrecognized, keypad {2}',
+      unknown: 'FW not detected — keypad {2} (model setting)',
+    },
     sync: {
       na: 'SYNC —', off: 'SYNC OFF', live: 'LIVE', retry: 'RESTART',
       stopped: 'Real-time sync stopped', restarted: 'Real-time sync restarted',
@@ -132,7 +133,7 @@ export const en = {
     helpTour: 'Top 12 objects above the horizon now',
     helpSpeed: 'ENTER: apply speed (Guide/Center/Find/Slew)',
     helpTrack: 'ENTER: apply tracking mode (Alt-Az/Polar/Land)',
-    helpFocus: 'GO TO runs the motor 2.5 s — Slew tab for fine control',
+    helpFocus: 'GO TO runs the motor 2.5 s — LX200 handpad: hold MAP keys',
     helpFocusIn: 'GO TO: run focus in 2.5 s',
     helpFocusOut: 'GO TO: run focus out 2.5 s',
     helpFocusStop: 'GO TO: stop focus motor',

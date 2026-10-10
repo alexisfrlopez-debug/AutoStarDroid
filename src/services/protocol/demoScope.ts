@@ -4,12 +4,22 @@
  * suivi sidéral, horizon, alignement, date/heure/site réels du téléphone.
  */
 import {raDecToAltAz, altAzToRaDec, separationDeg} from '../astro/coords';
+import type {ScopeModelId} from '../../store/settingsStore';
 
 const D2R = Math.PI / 180;
 const R2D = 180 / Math.PI;
 const SIDEREAL_DEG_S = 360.9856 / 86400; // ~0.004178 °/s
 
 interface Site {latDeg: number; lonDeg: number}
+
+/** Firmware simulé par modèle — utilisé par :GVP#/:GVN# (détection auto). */
+const DEMO_FW: Record<ScopeModelId, [string, string]> = {
+  autostar2: ['Autostar II', '43Eg'],
+  autostar497: ['Autostar #497', '43E1'],
+  autostar495: ['Autostar #495', '34Eb'],
+  autostar494: ['Autostar #494', '22Ee'],
+  lx200: ['Meade LX200', '4.2g'],
+};
 
 export class DemoScopeBrain {
   private site: Site = {latDeg: 48.8566, lonDeg: 2.3522};
@@ -28,6 +38,8 @@ export class DemoScopeBrain {
   private focusPos = 0;
   private tzOffset = 0; // sHH (négatif = ouest)
   private pendingAlign: string | null = null;
+  private fwProduct = 'Autostar II';
+  private fwVersion = '43Eg';
   private sites: Site[] = [
     {latDeg: 48.8566, lonDeg: 2.3522},
     {latDeg: 45.1885, lonDeg: 0.7193},
@@ -45,6 +57,13 @@ export class DemoScopeBrain {
   }
 
   setSiteForDemo(site: Site) {this.site = {...site}; this.sites[0] = {...site};}
+
+  /** Fixe le firmware rapporté par :GVP#/:GVN# (détection du clavier auto). */
+  setFirmwareForDemo(model: ScopeModelId) {
+    const [product, version] = DEMO_FW[model] ?? DEMO_FW.autostar2;
+    this.fwProduct = product;
+    this.fwVersion = version;
+  }
 
   private tick() {
     const now = Date.now();
@@ -205,9 +224,9 @@ export class DemoScopeBrain {
         this.tracking = false;
         return '';
       case c === ':GVP':
-        return 'Autostar II#';
+        return `${this.fwProduct}#`;
       case c === ':GVN':
-        return '43Eg#';
+        return `${this.fwVersion}#`;
       case c === ':GVD':
         return 'HSM#';
       case c === ':GVT':
@@ -219,6 +238,8 @@ export class DemoScopeBrain {
       case c === ':FQ': this.focusMoving = null; return '';
       case c === ':FP': this.focusMoving = '+'; return '';
       case c === ':FS': this.focusMoving = '-'; return '';
+      case c === ':B+': case c === ':B-': case c === ':B':
+        return ''; // réticule illuminé : luminosité non simulée
       case c === ':GPS':
         return '';
       default:

@@ -1,5 +1,10 @@
-/** Transport Démo : boucle locale vers un Autostar II simulé. */
+/**
+ * Transport Démo : boucle locale vers un télescope simulé dont le firmware
+ * (:GVP#/:GVN#) reflète le modèle choisi à la connexion — la détection et
+ * le mappage automatique du clavier s'exercent donc aussi en démo.
+ */
 import type {ConnectOptions, Transport, TransportType} from './types';
+import type {ScopeModelId} from '../../store/settingsStore';
 import {DemoScopeBrain} from '../protocol/demoScope';
 
 /** Cerveau partagé (une seule démo à la fois, usage interne du module). */
@@ -17,6 +22,8 @@ export class DemoTransport implements Transport {
   /** Réponses simulées en attente, annulées à la déconnexion. */
   private timers = new Set<number>();
 
+  constructor(private model: ScopeModelId = 'autostar2') {}
+
   onData(cb: (chunk: string) => void) {this.dataCb = cb;}
   onError(_cb: (msg: string) => void) {/* aucune erreur asynchrone en démo */}
   onClosed(cb: () => void) {this.closedCb = cb;}
@@ -24,6 +31,7 @@ export class DemoTransport implements Transport {
 
   connect(_opts: ConnectOptions): Promise<void> {
     demoBrain = new DemoScopeBrain();
+    demoBrain.setFirmwareForDemo(this.model);
     this.connected = true;
     return Promise.resolve();
   }
