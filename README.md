@@ -1,10 +1,10 @@
 # AutoStar Droid
 
-**Clone Android complet de ScopeBoss** — émulateur de raquettes Meade Autostar II et Autostar (#497/#495/#494) pour télescopes Meade LX200GPS, LX90, ETX…
+**Émulateur Android de raquettes Meade Autostar II et Autostar (#497/#495/#494) / LX200** — l'équivalent de ScopeBoss sur Android : une implémentation indépendante, écrite de zéro, pour télescopes Meade LX200GPS, LX90, ETX…
 
 Application React Native (TypeScript) — package `com.autostardroid` — Android 7.0+ (minSdk 24).
 
-[![Build APK](https://github.com/USERNAME/AutoStarDroid/actions/workflows/android.yml/badge.svg)](../../actions/workflows/android.yml)
+[![Build APK](https://github.com/alexisfrlopez-debug/AutoStarDroid/actions/workflows/android.yml/badge.svg)](https://github.com/alexisfrlopez-debug/AutoStarDroid/actions/workflows/android.yml) · [Feuille de route multi-plateformes](ROADMAP.md)
 
 ## Fonctionnalités
 
@@ -102,9 +102,17 @@ Protocole : voir `docs/PROTOCOLE.md`.
 
 ## Crédits & sources de données
 
-- Concept : clone non-commercial de **ScopeBoss** (iOS), l'excellent émulateur Autostar II de N. Olsen.
+- Concept : implémentation indépendante inspirée de **ScopeBoss** (iOS), l'excellent émulateur Autostar II de N. Olsen — aucun code ni asset réutilisé.
 - Coordonnées : [OpenNGC](https://github.com/mattiaverga/OpenNGC) (CC-BY-SA-4.0), [HYG v4.4](https://codeberg.org/astronexus/hyg) (CC-BY-SA-4.0), contre-vérification d3-celestial.
 - Drivers USB : [usb-serial-for-android](https://github.com/mik3y/usb-serial-for-android) (MIT).
 - Éphémérides : formules de Paul Schlyter (domaine public).
 
-*Projet d'amateur, sans affiliation avec Meade Instruments ni l'auteur de ScopeBoss.*
+## Licence
+
+- **Code** : licence propriétaire source-available — voir [LICENSE.md](LICENSE.md) : usage personnel, compilation et modification autorisés ; **redistribution et exploitation commerciale interdites** sans autorisation de l'auteur.
+- **Catalogues** (`src/services/catalog/`) : données [OpenNGC](https://github.com/mattiaverga/OpenNGC) et [HYG](https://codeberg.org/astronexus/hyg), sous **CC-BY-SA-4.0**.
+- **Marques** : Meade, Autostar, LX200, ETX sont des marques de Meade Instruments Corporation — projet indépendant, sans affiliation ni endorsement. ScopeBoss est un produit de son auteur : cette implémentation indépendante ne réutilise aucun de ses éléments.
+
+## Feuille de route
+
+Portage Windows (Microsoft Store), Google Play, macOS/Linux et modèle de monétisation : voir [ROADMAP.md](ROADMAP.md).
