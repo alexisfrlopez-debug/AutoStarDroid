@@ -49,6 +49,10 @@ interface ScopeState {
   hbExternal: boolean;
   /** Directions déduites du mouvement physique (croix de la raquette virtuelle allumée). */
   hbDirs: {n: boolean; s: boolean; e: boolean; w: boolean} | null;
+  /** Slew RAPIDE constaté sur le matériel (GOTO ou flèche à haute vitesse,
+   *  > 1°/s) : le LCD de la raquette physique affiche « Slewing... » et le
+   *  miroir de la raquette virtuelle l'affiche à l'identique. */
+  hbSlewFast: boolean;
   altDeg: number | null; // lu en direct (:Ga) quand la synchro est active
   azDeg: number | null; // lu en direct (:Gz)
   scopeTime: string; // 'HH:MM:SS' lu sur la raquette
@@ -68,6 +72,7 @@ interface ScopeState {
   setHbMoving: (m: boolean) => void;
   setHbExternal: (x: boolean) => void;
   setHbDirs: (d: {n: boolean; s: boolean; e: boolean; w: boolean} | null) => void;
+  setHbSlewFast: (v: boolean) => void;
   setAltAz: (altDeg: number | null, azDeg: number | null) => void;
   setScopeTime: (t: string) => void;
   setScopeDate: (d: string) => void;
@@ -95,6 +100,7 @@ const initial = {
   hbMoving: false,
   hbExternal: false,
   hbDirs: null as ScopeState['hbDirs'],
+  hbSlewFast: false,
   altDeg: null as number | null,
   azDeg: null as number | null,
   scopeTime: '--:--:--',
@@ -119,6 +125,7 @@ export const useScopeStore = create<ScopeState>((set) => ({
   setHbMoving: (hbMoving) => set({hbMoving}),
   setHbExternal: (hbExternal) => set({hbExternal}),
   setHbDirs: (hbDirs) => set({hbDirs}),
+  setHbSlewFast: (hbSlewFast) => set({hbSlewFast}),
   setAltAz: (altDeg, azDeg) => set({altDeg, azDeg}),
   setScopeTime: (scopeTime) => set({scopeTime}),
   setScopeDate: (scopeDate) => set({scopeDate}),

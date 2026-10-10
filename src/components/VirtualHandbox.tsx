@@ -14,18 +14,22 @@
  *   …rangées du mappage…      <- ENTER/MODE/GO TO, croix, pavé 0-9,
  *                                défilement + ? (ou clavier LX200)
  *
- * Synchronisation temps réel avec la raquette réelle — mode MIROIR :
+ * Synchronisation temps réel avec la raquette réelle — HAND CONTROL PANEL
+ * (comportement du « Hand Control » d'AutostarSuite, branché en série/USB) :
  * quand la synchro est ACTIVE (par défaut à la connexion), le LCD affiche
  * EN CONTINU le même écran d'observation que la raquette physique (AD/DEC
- * relues toutes les 500 ms, alt/az toutes les 2 s) — la navigation locale
- * des menus n'est qu'un aperçu temporaire qui rend la main à l'écran
- * miroir après 5 s sans touche. Les appuis SUR LA RAQUETTE PHYSIQUE sont
- * répercutés : le mouvement constaté allume la croix virtuelle (directions
- * déduites des deltas AD/DEC), affiche ● PHYSIQUE et fait réapparaître
- * l'écran miroir aussitôt. Le bouton SYNCHRO sous l'écran permet de la
- * désactiver (retour au menu local) ou de la relancer (appui long quand
- * LIVE, appui direct quand elle est en erreur). Une pilule ■ STOP
- * apparaît pendant un mouvement. Le port série d'une raquette ne
+ * relues toutes les 500 ms, alt/az en continu ; MODE bascule AD/DEC ↔
+ * Alt/Az) ; pendant un slew rapide du matériel (GOTO, flèche haute vitesse)
+ * l'écran miroir affiche « Slewing... » exactement comme le LCD du #497.
+ * Les appuis SUR LA RAQUETTE PHYSIQUE sont répercutés : le mouvement constaté
+ * allume la croix virtuelle (directions déduites des deltas AD/DEC) et
+ * affiche ● PHYSIQUE. Les touches VIRTUELLES pilotent le télescope par le
+ * protocole (flèches :Mn…/:Q*, GO TO :Sr/:Sd/:MS) — comme le panel ASU — et
+ * la navigation MODE/ENTER/défilement des menus locaux n'est qu'un aperçu
+ * temporaire qui rend la main à l'écran miroir après 5 s sans touche (ou
+ * dès qu'un mouvement physique est constaté). Le bouton SYNCHRO sous
+ * l'écran désactive (retour menu local) ou relance la synchro ; une pilule
+ * ■ STOP apparaît pendant un mouvement. Le port série d'une raquette ne
  * transmettant pas ses touches de menu, les touches MODE/ENTER/défilement
  * pilotent le modèle de menus local, comme sur le matériel.
  */
@@ -80,6 +84,7 @@ export function VirtualHandbox() {
   const hbMoving = useScopeStore((s) => s.hbMoving);
   const hbExternal = useScopeStore((s) => s.hbExternal);
   const hbDirs = useScopeStore((s) => s.hbDirs);
+  const hbSlewFast = useScopeStore((s) => s.hbSlewFast);
   const hasPos = useScopeStore((s) => s.hasPos);
   const altDeg = useScopeStore((s) => s.altDeg);
   const azDeg = useScopeStore((s) => s.azDeg);
@@ -221,6 +226,14 @@ export function VirtualHandbox() {
     selected.onEnter?.();
   };
   const mode = () => {
+    // Comportement « Hand Control » (AutostarSuite) : sur l'écran
+    // d'observation miroir, MODE change d'écran d'information (AD/DEC ↔
+    // Alt/Az) — comme les touches d'affichage du #497 ; dans les menus
+    // (aperçu local), MODE remonte d'un niveau comme sur le matériel.
+    if (mirrorActive && !cursor.length) {
+      setPosView((v) => (v === 'radec' ? 'altaz' : 'radec'));
+      return;
+    }
     armOverlay();
     setInput('');
     setMsg('');
@@ -369,10 +382,25 @@ export function VirtualHandbox() {
     // PAS de faux « RA 00:00:00 » — le diagnostic suit sous les pastilles
     line1 = 'SYNCHRO LIVE';
     line2 = hintLcd(hbHint, t).slice(0, 16);
-  } else if (mirrorActive) {
-    // Écran d'observation synchronisé : identique à la raquette physique
+  } else if (mirrorActive && hbSlewFast) {
+    // Slew rapide constaté sur le matériel (GOTO ou flèche haute vitesse) :
+    // le LCD de la raquette physique affiche « Slewing... » pendant ces
+    // mouvements — le miroir l'affiche À L'IDENTIQUE (libellé matériel du
+    // #497, volontairement non traduit, comme sur le vrai écran).
     line1 = `RA ${raDegToHMS(raDeg)}`;
-    line2 = `DEC ${decDegToDMS(decDeg)}`;
+    line2 = 'Slewing...';
+  } else if (mirrorActive) {
+    // Écran d'observation synchronisé : identique à la raquette physique.
+    // MODE (ou appui sur la ligne de télémétrie) bascule AD/DEC ↔ Alt/Az ;
+    // tant que :Ga#/:Gz# n'ont rien lu, on reste sur AD/DEC (jamais d'écran
+    // vide — le miroir est continu).
+    if (posView === 'altaz' && altDeg !== null && azDeg !== null) {
+      line1 = `ALT ${decDegToDMS(altDeg)}`;
+      line2 = `AZ ${decDegToDMS(azDeg)}`;
+    } else {
+      line1 = `RA ${raDegToHMS(raDeg)}`;
+      line2 = `DEC ${decDegToDMS(decDeg)}`;
+    }
   } else if (!cursor.length && connected && hbSync === 'live' && hasPos) {
     // aperçu menu terminé : dernière position connue maintenue à l'écran
     // (le diagnostic éventuel est détaillé par la ligne rouge sous les

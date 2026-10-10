@@ -116,6 +116,12 @@ export class AutostarClient {
    *  ne répondent pas au port série pendant un moteur). */
   private lastMovedFlag = false;
   private lastExternalAt = 0;
+  /** Horodatage de la position PRÉCÉDENTE (pour le taux de déplacement). */
+  private prevPosAt = 0;
+  /** « Slewing... » reste affiché 1,2 s après le dernier slew rapide constaté
+   *  (les cycles où les axes sont muets pendant le moteur ne le font pas
+   *  clignoter). */
+  private slewFastUntil = 0;
   private log = (dir: 'sent' | 'recv' | 'info' | 'error', text: string) =>
     useScopeStore.getState().pushLog(dir, text);
 
@@ -146,6 +152,7 @@ export class AutostarClient {
       s.setHbMoving(false);
       s.setHbExternal(false);
       s.setHbDirs(null);
+      s.setHbSlewFast(false);
       s.setHbHint('none');
       s.pushLog('info', 'Liaison fermée');
       handboxSync.reset();
@@ -219,6 +226,8 @@ export class AutostarClient {
     this.lastDecDeg = null;
     this.lastMovedFlag = false;
     this.lastExternalAt = 0;
+    this.prevPosAt = 0;
+    this.slewFastUntil = 0;
     this.ownMoveUntil = 0;
     this.holding.clear();
     this.priorityUntil = 0;
@@ -552,7 +561,19 @@ export class AutostarClient {
             dirs = {n: dDec > th, s: dDec < -th, e: dRa > th, w: dRa < -th};
             if (!dirs.n && !dirs.s && !dirs.e && !dirs.w) dirs = null;
             this.lastExternalAt = now;
+            // Slew RAPIDE (= GOTO ou flèche haute vitesse sur le matériel) :
+            // taux > 1°/s — au-dessus de Center (~0,5°/s), en-dessous du Find
+            // (2°/s)… le LCD du matériel affiche « Slewing... », le miroir
+            // aussi. Le drapeau tient 1,2 s pour survivre aux cycles où les
+            // axes deviennent muets pendant le moteur.
+            const elSec = Math.min(Math.max((now - this.prevPosAt) / 1000, 0.2), 6);
+            if ((Math.abs(dRa) + Math.abs(dDec)) / elSec > 1.0) {
+              this.slewFastUntil = now + 1200;
+            }
           }
+          // « Slewing... » sur le LCD miroir (toutes les positions lues)
+          s.setHbSlewFast(now < this.slewFastUntil);
+          this.prevPosAt = now;
           if (init) {
             // pas de position : l'écran miroir reste en « attente », le
             // diagnostic explique l'initialisation (la LIAISON, elle, marche)

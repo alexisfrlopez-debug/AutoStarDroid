@@ -52,6 +52,7 @@ export const handboxSync = {
     s.setHbMoving(false);
     s.setHbExternal(false);
     s.setHbDirs(null);
+    s.setHbSlewFast(false);
     autostar.setPollInterval(SYNC_SLOW_MS);
     autostar.setPollAltAz(false);
     s.pushLog('info', 'Synchro raquette temps réel désactivée');
@@ -78,6 +79,7 @@ export const handboxSync = {
     s.setHbMoving(false);
     s.setHbExternal(false);
     s.setHbDirs(null);
+    s.setHbSlewFast(false);
     s.setHasPos(false);
     s.setAltAz(null, null);
   },
