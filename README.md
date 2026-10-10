@@ -16,7 +16,8 @@ Application React Native (TypeScript) — package `com.autostardroid` — Androi
 | **GoTo** | Catalogues **Messier (110 objets)**, **NGC célèbres (79)**, **95 étoiles nommées**, **planètes calculées** (éphémérides basse précision, Soleil→Neptune), **Tour du ciel** trié par hauteur, recherche globale |
 | **Alignement** | Modes Alt-Az / Polaire / Terrestre (`:AA/:AP/:AL`), parcours guidé Easy/Une étoile/Deux étoiles avec SYNC (`:CM`) |
 | **Sync téléphone → raquette** | Envoi automatique date (`:SC`), heure (`:SL`), fuseau (`:SG`), latitude (`:St`) et longitude (`:Sg`) depuis le GPS et l'horloge du téléphone — réglage demandé par ScopeBoss mais absent de beaucoup d'apps |
-| **Raquette virtuelle** | Émulation LCD 2×16 + clavier Autostar II (MODE/ENTER/GOTO/flèches) avec arborescence de menus reliée au protocole |
+| **Raquette virtuelle** | Réplique fidèle du clavier **Autostar #497 / Autostar II** : LCD 2×16 synchronisé (position AD/DEC relue en continu), rangée ENTER/MODE/GO TO, croix directionnelle (maintien = slew `:M`/`:Q`), pavé numérique 1-9/0 avec étiquettes Autostar II (SPEED/CALD/M/FOCUS/SS/STAR/RET/LC./NGC/LIGHT), touches de défilement + aide `?`, menus arborescents (Objet/Config/Guide/Util.) reliés au protocole, saisie chiffrée type « M45 + ENTER », appui long MODE = accueil |
+| **Mise en station** | Aides au calage équatorial par les capteurs du téléphone : **niveau à bulle** (accéléromètre), **inclinomètre de l'axe horaire** vs latitude du site, **boussole + visée Polaris** (azimut vrai, déclinaison magnétique réglable), **site GPS** (acquisition + envoi date/heure/site à la raquette) |
 | **Console** | Journal du trafic série temps réel (commandes envoyées/reçues) |
 | **Langue** | Bilingue français / anglais, commutable dans Réglages |
 | **Vision nocturne** | Palette rouge plein écran (préserve l'adaptation oculaire) |
