@@ -13,9 +13,13 @@
  * Quand elle est DÉSACTIVÉE (« off »), le LCD reprend son menu local et le
  * polling repasse en mode fond (2 s) pour nourrir le reste de l'application.
  *
- * Si la raquette cesse de répondre (3 échecs consécutifs), la synchro passe
- * en « error » : l'utilisateur peut la relancer d'un appui sur le bouton
- * SYNCHRO de la raquette virtuelle.
+ * Si la raquette cesse de répondre (5 échecs consécutifs hors mouvement),
+ * la synchro passe en « error » : un diagnostic est alors lancé (:GVP#) —
+ * liaison vivante mais muette sur la position (monture non reliée/sous
+ * tension ou raquette non initialisée) → message dédié ; liaison morte →
+ * message transport. L'utilisateur peut relancer d'un appui sur le bouton
+ * SYNCHRO de la raquette virtuelle, et l'erreur est affichée sous les
+ * pastilles (elle n'était visible que dans le journal avant v1.4.1).
  *
  * Note matériel : le protocole série Meade (#49x/LX200) ne permet pas de lire
  * le contenu littéral du LCD de la raquette physique — la synchro reconstitue
@@ -48,6 +52,8 @@ export const handboxSync = {
     const s = useScopeStore.getState();
     s.setHbSync('off');
     s.setHbMoving(false);
+    s.setHbExternal(false);
+    s.setHbDirs(null);
     autostar.setPollInterval(SYNC_SLOW_MS);
     autostar.setPollAltAz(false);
     s.pushLog('info', 'Synchro raquette temps réel désactivée');
@@ -73,6 +79,7 @@ export const handboxSync = {
     s.setHbMoving(false);
     s.setHbExternal(false);
     s.setHbDirs(null);
+    s.setHasPos(false);
     s.setAltAz(null, null);
   },
 };

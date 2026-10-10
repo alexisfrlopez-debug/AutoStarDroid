@@ -120,6 +120,9 @@ export const fr: Dict = {
       na: 'SYNCHRO —', off: 'SYNCHRO OFF', live: 'LIVE', retry: 'RELANCER',
       stopped: 'Synchro temps réel arrêtée', restarted: 'Synchro temps réel relancée',
       phys: 'PHYSIQUE',
+      waitPos: 'Attente position…',
+      errGeneric: 'Synchro interrompue : ',
+      errNoPos: 'Liaison active mais la raquette ne renvoie aucune position AD/DEC. Vérifiez que la raquette est bien reliée à la monture, que celle-ci est sous tension, et que la raquette a terminé son initialisation (écran principal atteint).',
     },
     msgs: {
       noObject: 'Objet inaccessible', syncing: 'Envoi date/heure/site…',

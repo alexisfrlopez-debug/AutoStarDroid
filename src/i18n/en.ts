@@ -118,6 +118,9 @@ export const en = {
       na: 'SYNC —', off: 'SYNC OFF', live: 'LIVE', retry: 'RESTART',
       stopped: 'Real-time sync stopped', restarted: 'Real-time sync restarted',
       phys: 'PHYSICAL',
+      waitPos: 'Waiting for pos…',
+      errGeneric: 'Sync interrupted: ',
+      errNoPos: 'Link is alive but the handbox returns no RA/DEC position. Check that the handbox is connected to the mount, that the mount is powered on, and that the handbox finished booting (main screen reached).',
     },
     msgs: {
       noObject: 'Object unreachable', syncing: 'Sending date/time/site…',

@@ -33,9 +33,9 @@ import {useEffect, useMemo, useRef, useState} from 'react';
 import {Pressable, Text, View, Vibration} from 'react-native';
 import {useT} from '../i18n';
 import {useSettingsStore} from '../store/settingsStore';
-import {useScopeStore} from '../store/scopeStore';
 import {autostar, type Dir} from '../services/protocol/client';
 import {handboxSync, SYNC_FAST_MS} from '../services/protocol/handboxSync';
+import {useScopeStore, HB_ERR_NO_POS} from '../store/scopeStore';
 import {KEYMAPS, FW_SHORT, type KeyAct, type KeySpec} from '../services/protocol/keymaps';
 import {LcdPanel} from './LcdPanel';
 import {usePal} from './ui';
@@ -47,6 +47,9 @@ import {type DisplayObject} from '../services/catalog';
 import {raDegToHMS, decDegToDMS} from '../services/astro/time';
 
 type Speed = 'guide' | 'center' | 'find' | 'slew';
+
+/** Retour automatique à l'écran miroir après ce délai sans touche (menus). */
+const MIRROR_RETURN_MS = 5000;
 
 /** Raccourcis vitesse des raquettes #494/#495/#497 (touches 1-9). */
 const DIGIT_SPEED: Record<number, Speed> = {
@@ -70,6 +73,8 @@ export function VirtualHandbox() {
   const hbMoving = useScopeStore((s) => s.hbMoving);
   const hbExternal = useScopeStore((s) => s.hbExternal);
   const hbDirs = useScopeStore((s) => s.hbDirs);
+  const hasPos = useScopeStore((s) => s.hasPos);
+  const hbError = useScopeStore((s) => s.hbError);
   const altDeg = useScopeStore((s) => s.altDeg);
   const azDeg = useScopeStore((s) => s.azDeg);
   const fwModel = useScopeStore((s) => s.fwModel);
@@ -98,7 +103,6 @@ export function VirtualHandbox() {
   const later = (fn: () => void, ms: number) => {
     timers.current.push(setTimeout(fn, ms) as unknown as number);
   };
-  const MIRROR_RETURN_MS = 5000;
   const armOverlay = () => {
     setOverlay(true);
     if (overlayTimer.current !== null) clearTimeout(overlayTimer.current);
@@ -354,8 +358,19 @@ export function VirtualHandbox() {
   if (msg) {
     line1 = msg.slice(0, 16);
     line2 = msg.slice(16, 32);
+  } else if (mirrorActive && !hasPos) {
+    // synchro live mais aucune position encore lue sur cette liaison :
+    // pas de faux « RA 00:00:00 » (les zéros initiaux ne sont pas la
+    // position de la raquette)
+    line1 = 'SYNCHRO LIVE';
+    line2 = t.hb.sync.waitPos.slice(0, 16);
   } else if (mirrorActive) {
     // Écran d'observation synchronisé : identique à la raquette physique
+    line1 = `RA ${raDegToHMS(raDeg)}`;
+    line2 = `DEC ${decDegToDMS(decDeg)}`;
+  } else if (!cursor.length && connected && hbSync === 'error' && hasPos) {
+    // synchro interrompue : dernière position connue maintenue à l'écran
+    // (l'erreur est détaillée par la ligne rouge sous les pastilles)
     line1 = `RA ${raDegToHMS(raDeg)}`;
     line2 = `DEC ${decDegToDMS(decDeg)}`;
   } else if (!cursor.length) {
@@ -367,7 +382,10 @@ export function VirtualHandbox() {
   }
   const ctxLine = selected.line2 ?? '';
   // Ligne de télémétrie sous l'écran (appui = bascule AD/DEC ↔ Alt/Az)
-  const raDecText = `${hbMoving ? '»' : ' '}${raDegToHMS(raDeg)}  ${decDegToDMS(decDeg)}`;
+  // — tirets tant qu'aucune position n'a été lue sur cette liaison
+  const raDecText = !hasPos
+    ? 'RA --:--:--  DEC --°--'
+    : `${hbMoving ? '»' : ' '}${raDegToHMS(raDeg)}  ${decDegToDMS(decDeg)}`;
   const altAzText = altDeg !== null && azDeg !== null
     ? `ALT ${decDegToDMS(altDeg)}  AZ ${decDegToDMS(azDeg)}`
     : raDecText;
@@ -575,6 +593,12 @@ export function VirtualHandbox() {
         ) : null}
         <SyncPill />
       </View>
+      {connected && hbSync === 'error' && hbError ? (
+        <Text numberOfLines={3}
+          style={{color: c.red, fontSize: 10, lineHeight: 14, textAlign: 'center', marginTop: 4}}>
+          {hbError === HB_ERR_NO_POS ? t.hb.sync.errNoPos : `${t.hb.sync.errGeneric}${hbError}`}
+        </Text>
+      ) : null}
       {fwLine ? (
         <Text numberOfLines={1}
           style={{color: c.textFaint, fontSize: 9.5, textAlign: 'center', marginTop: 4, letterSpacing: 0.3}}>

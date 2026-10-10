@@ -5,6 +5,10 @@ import type {TransportType} from '../services/connection/types';
 export type ConnStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
 /** État de la synchronisation temps réel raquette virtuelle ↔ physique. */
 export type HbSyncStatus = 'off' | 'live' | 'error';
+/** Sentinelle de diagnostic : liaison active mais raquette muette sur la
+ *  position (monture non reliée/sous tension ou raquette non initialisée).
+ *  L'UI la traduit (i18n) au lieu d'afficher une erreur transport brute. */
+export const HB_ERR_NO_POS = 'NO_POSITION';
 
 export interface LogLine {
   ts: number;
@@ -22,6 +26,10 @@ interface ScopeState {
   fwModel: ScopeModelId | null;
   raDeg: number; // position courante AD (deg)
   decDeg: number; // position courante DEC (deg)
+  /** Une position a AU MOINS été lue une fois sur cette liaison (sinon les
+   *  zéros initiaux ne doivent pas être affichés comme si c'étaient la
+   *  position de la raquette). */
+  hasPos: boolean;
   targetRaDeg: number | null;
   targetDecDeg: number | null;
   targetName: string;
@@ -44,6 +52,7 @@ interface ScopeState {
   setModel: (m: ScopeModelId | null) => void;
   setFirmware: (product: string | null, version: string | null, model: ScopeModelId | null) => void;
   setPosition: (raDeg: number, decDeg: number) => void;
+  setHasPos: (v: boolean) => void;
   setTarget: (raDeg: number, decDeg: number, name: string) => void;
   setSpeed: (s: ScopeState['speed']) => void;
   setAlignMode: (m: ScopeState['alignMode']) => void;
@@ -68,6 +77,7 @@ const initial = {
   fwModel: null as ScopeModelId | null,
   raDeg: 0,
   decDeg: 0,
+  hasPos: false,
   targetRaDeg: null as number | null,
   targetDecDeg: null as number | null,
   targetName: '',
@@ -91,7 +101,8 @@ export const useScopeStore = create<ScopeState>((set) => ({
   setTransportType: (transportType) => set({transportType}),
   setModel: (model) => set({model}),
   setFirmware: (fwProduct, fwVersion, fwModel) => set({fwProduct, fwVersion, fwModel}),
-  setPosition: (raDeg, decDeg) => set({raDeg, decDeg}),
+  setPosition: (raDeg, decDeg) => set({raDeg, decDeg, hasPos: true}),
+  setHasPos: (hasPos) => set({hasPos}),
   setTarget: (targetRaDeg, targetDecDeg, targetName) =>
     set({targetRaDeg, targetDecDeg, targetName}),
   setSpeed: (speed) => set({speed}),

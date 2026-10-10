@@ -12,7 +12,7 @@ import {PROFILES, SPEED_CMDS} from './profiles';
 import {proto} from '../astro/time';
 import type {ScopeModelId} from '../../store/settingsStore';
 import {useSettingsStore} from '../../store/settingsStore';
-import {useScopeStore} from '../../store/scopeStore';
+import {useScopeStore, HB_ERR_NO_POS} from '../../store/scopeStore';
 
 export type Dir = 'n' | 's' | 'e' | 'w';
 export type Speed = keyof typeof SPEED_CMDS;
@@ -68,7 +68,7 @@ function parseRa(s: string): number | null {
  */
 const VALID = {
   ra: /^\d{1,2}:\d{2}/,          // :Gr# :GL#  → "HH:MM:SS" ou "HH:MM.T"
-  dec: /^[+-]?\d{1,3}[°*]/,      // :Gd# :Ga# :Gz# :Gt# :Gg# → "sDD*MM"
+  dec: /^[+-]?\d{1,3}[°*]\d{1,2}|^[+-]\d{1,3}:\d{1,2}/, // :Gd# :Ga# :Gz#… → "sDD*MM" (tolère "sDD:MM")
   date: /^\d{1,2}\/\d{1,2}/,     // :GC# → "MM/JJ/AA"
   tz: /^[+-]?\d/,                // :GG# → heures de décalage
   bit: /^[01]$/,                 // :Sr# :Sd# → validé/refusé
@@ -122,6 +122,7 @@ export class AutostarClient {
       const s = useScopeStore.getState();
       s.setConnStatus('disconnected');
       s.setFirmware(null, null, null);
+      s.setHasPos(false);
       s.setHbMoving(false);
       s.setHbExternal(false);
       s.setHbDirs(null);
@@ -193,6 +194,12 @@ export class AutostarClient {
     try {await this.transport?.disconnect();} catch (_) {}
     this.transport = null;
     this.buffer = '';
+    this.lastRaDeg = null;
+    this.lastDecDeg = null;
+    this.lastMovedFlag = false;
+    this.lastExternalAt = 0;
+    this.ownMoveUntil = 0;
+    handboxSync.reset(); // purge synchro + état physique (mêmes IDs que onClosed)
     const s = useScopeStore.getState();
     s.setConnStatus('disconnected');
     s.setTransportType(null);
@@ -269,7 +276,10 @@ export class AutostarClient {
   /* ---------- API haut niveau ---------- */
 
   async getRaDec(timeoutMs = 3000): Promise<RaDec> {
-    const [ra, dec] = await Promise.all([this.cmd(':Gr#', timeoutMs, VALID.ra), this.cmd(':Gd#', timeoutMs, VALID.dec)]);
+    // séquentiel avec échec rapide : si :Gr# ne répond pas, inutile d'attendre
+    // aussi :Gd# (raquette muette sur la position = cycle 2× plus court)
+    const ra = await this.cmd(':Gr#', timeoutMs, VALID.ra);
+    const dec = await this.cmd(':Gd#', timeoutMs, VALID.dec);
     const raDeg = parseRa(ra);
     const decDeg = parseDec(dec);
     if (raDeg === null || decDeg === null) throw new TransportError('Réponse position illisible');
@@ -339,7 +349,9 @@ export class AutostarClient {
     return {time, date, tz, latDeg: parseDec(lat), lonDeg: parseDec(lon)};
   }
 
-  /** Envoie date/heure/site du téléphone vers la raquette. */
+  /** Envoie date/heure/site du téléphone vers la raquette. Les commandes
+   *  :SG/:SL/:SC/:St/:Sg RÉPONDENT ("1") — la réponse est consommée (et
+   *  tolérée si muette) au lieu de rester dans le tampon série. */
   async pushPhoneData(latDeg: number, lonDeg: number): Promise<void> {
     const now = new Date();
     const tzOffsetMin = -now.getTimezoneOffset();
@@ -355,16 +367,17 @@ export class AutostarClient {
     const dd = String(local.getUTCDate()).padStart(2, '0');
     const mo = String(local.getUTCMonth() + 1).padStart(2, '0');
     const yy = String(local.getUTCFullYear()).slice(2);
-    await this.cmdSilent(`:SG${tzOffsetMin >= 0 ? '+' : '-'}${tzVal}#`);
+    const ignore = () => undefined;
+    await this.cmd(`:SG${tzOffsetMin >= 0 ? '+' : '-'}${tzVal}#`, 2000, VALID.bit).catch(ignore);
     await sleep(120);
-    await this.cmdSilent(`:SL${hh}:${mm}:${ss}#`);
+    await this.cmd(`:SL${hh}:${mm}:${ss}#`, 2000, VALID.bit).catch(ignore);
     await sleep(120);
-    await this.cmdSilent(`:SC${mo}/${dd}/${yy}#`);
+    await this.cmd(`:SC${mo}/${dd}/${yy}#`, 2500, VALID.bit).catch(ignore);
     await sleep(400);
-    await this.cmdSilent(`:St${proto.decCmd(latDeg)}#`);
+    await this.cmd(`:St${proto.decCmd(latDeg)}#`, 2000, VALID.bit).catch(ignore);
     await sleep(120);
     const lonMeade = lonDeg < 0 ? 360 + lonDeg : lonDeg;
-    await this.cmdSilent(`:Sg${proto.decCmd(lonMeade)}#`);
+    await this.cmd(`:Sg${proto.decCmd(lonMeade)}#`, 2000, VALID.bit).catch(ignore);
   }
 
   async setTracking(mode: 'altaz' | 'polar' | 'land') {
@@ -454,19 +467,31 @@ export class AutostarClient {
         // panne de synchro — on tolère et on retente au tick suivant.
         const busy = this.lastMovedFlag || Date.now() - this.lastExternalAt < 3000;
         if (!busy) this.failCount += 1;
-        if (this.failCount >= 3) {
+        if (this.failCount >= 5) {
           this.failCount = 0;
           const s = useScopeStore.getState();
           if (s.hbSync === 'live') {
-            // la raquette ne répond plus : synchro en erreur, retour au fond lent
+            // DIAGNOSTIC : la liaison répond-elle encore à une requête
+            // statique (:GVP#) ? Oui → la raquette est muette sur la POSITION
+            // (monture non reliée/sous tension, ou raquette non initialisée —
+            // c'est le cas typique du test au bureau) ; non → liaison perdue.
+            let err = (e as Error).message;
+            try {
+              const p = await this.cmd(':GVP#', 2500);
+              if (p && p !== '?') {
+                err = HB_ERR_NO_POS;
+                s.pushLog('error', 'Synchro : liaison active mais aucune position AD/DEC renvoyée (monture reliée/initialisée ?)');
+              }
+            } catch (_) {
+              s.pushLog('error', 'Synchro : la raquette ne répond plus du tout');
+            }
             s.setHbSync('error');
-            s.setHbError((e as Error).message);
+            s.setHbError(err);
             s.setHbMoving(false);
             s.setHbExternal(false);
             s.setHbDirs(null);
             this.setPollInterval(2000);
             this.setPollAltAz(false);
-            s.pushLog('error', `Synchro temps réel interrompue : ${(e as Error).message}`);
           }
         }
       } finally {
