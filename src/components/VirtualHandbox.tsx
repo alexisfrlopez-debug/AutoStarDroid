@@ -14,16 +14,20 @@
  *   …rangées du mappage…      <- ENTER/MODE/GO TO, croix, pavé 0-9,
  *                                défilement + ? (ou clavier LX200)
  *
- * Synchronisation temps réel avec la raquette réelle : quand elle est
- * ACTIVE (par défaut à la connexion), le LCD affiche en continu le même
- * écran d'observation que la raquette physique (AD/DEC relues toutes les
- * 500 ms, alt/az toutes les 2 s, indicateur de mouvement) ; le bouton
- * SYNCHRO sous l'écran permet de la désactiver (retour au menu local) ou
- * de la relancer (appui long quand LIVE, appui direct quand elle est en
- * erreur). Une pilule ■ STOP apparaît pendant un mouvement. Les touches
- * de navigation (MODE/ENTER/défilement) pilotent le modèle de menus
- * local, comme sur le matériel — le port série d'une raquette ne
- * transmet pas ces touches.
+ * Synchronisation temps réel avec la raquette réelle — mode MIROIR :
+ * quand la synchro est ACTIVE (par défaut à la connexion), le LCD affiche
+ * EN CONTINU le même écran d'observation que la raquette physique (AD/DEC
+ * relues toutes les 500 ms, alt/az toutes les 2 s) — la navigation locale
+ * des menus n'est qu'un aperçu temporaire qui rend la main à l'écran
+ * miroir après 5 s sans touche. Les appuis SUR LA RAQUETTE PHYSIQUE sont
+ * répercutés : le mouvement constaté allume la croix virtuelle (directions
+ * déduites des deltas AD/DEC), affiche ● PHYSIQUE et fait réapparaître
+ * l'écran miroir aussitôt. Le bouton SYNCHRO sous l'écran permet de la
+ * désactiver (retour au menu local) ou de la relancer (appui long quand
+ * LIVE, appui direct quand elle est en erreur). Une pilule ■ STOP
+ * apparaît pendant un mouvement. Le port série d'une raquette ne
+ * transmettant pas ses touches de menu, les touches MODE/ENTER/défilement
+ * pilotent le modèle de menus local, comme sur le matériel.
  */
 import {useEffect, useMemo, useRef, useState} from 'react';
 import {Pressable, Text, View, Vibration} from 'react-native';
@@ -64,6 +68,8 @@ export function VirtualHandbox() {
   const alignMode = useScopeStore((s) => s.alignMode);
   const hbSync = useScopeStore((s) => s.hbSync);
   const hbMoving = useScopeStore((s) => s.hbMoving);
+  const hbExternal = useScopeStore((s) => s.hbExternal);
+  const hbDirs = useScopeStore((s) => s.hbDirs);
   const altDeg = useScopeStore((s) => s.altDeg);
   const azDeg = useScopeStore((s) => s.azDeg);
   const fwModel = useScopeStore((s) => s.fwModel);
@@ -79,11 +85,39 @@ export function VirtualHandbox() {
   const [input, setInput] = useState('');
   const [msg, setMsg] = useState('');
   const [posView, setPosView] = useState<'radec' | 'altaz'>('radec');
+  /** Aperçu temporaire des menus locaux quand la synchro est LIVE : sans
+   *  touche pendant 5 s, l'écran miroir (AD/DEC de la raquette physique)
+   *  reprend la main, pour que les 2 affichages restent identiques. */
+  const [overlay, setOverlay] = useState(false);
+  const overlayTimer = useRef<number | null>(null);
   const timers = useRef<number[]>([]);
-  useEffect(() => () => {timers.current.forEach((id) => clearTimeout(id));}, []);
+  useEffect(() => () => {
+    timers.current.forEach((id) => clearTimeout(id));
+    if (overlayTimer.current !== null) clearTimeout(overlayTimer.current);
+  }, []);
   const later = (fn: () => void, ms: number) => {
     timers.current.push(setTimeout(fn, ms) as unknown as number);
   };
+  const MIRROR_RETURN_MS = 5000;
+  const armOverlay = () => {
+    setOverlay(true);
+    if (overlayTimer.current !== null) clearTimeout(overlayTimer.current);
+    overlayTimer.current = setTimeout(
+      () => setOverlay(false), MIRROR_RETURN_MS,
+    ) as unknown as number;
+  };
+  /** La raquette physique bouge → l'écran miroir reprend la main aussitôt. */
+  useEffect(() => {
+    if (hbExternal) {
+      setMsg('');
+      setOverlay(false);
+      if (overlayTimer.current !== null) {clearTimeout(overlayTimer.current); overlayTimer.current = null;}
+    }
+  }, [hbExternal]);
+  /** Synchro (re)lancée → écran miroir immédiat. */
+  useEffect(() => {
+    if (hbSync === 'live') {setMsg(''); setOverlay(false);}
+  }, [hbSync]);
   const showMsg = (m: string, ms = 3500) => {
     setMsg(m);
     later(() => setMsg(''), ms);
@@ -170,18 +204,21 @@ export function VirtualHandbox() {
 
   /* ---------- Navigation ---------- */
   const enter = () => {
+    armOverlay();
     if (input) {jumpToInput(false); return;}
     if (!cursor.length) {setCursor([0]); return;}
     if (selected.children?.length) {setInput(''); setCursor([...cursor, 0]); return;}
     selected.onEnter?.();
   };
   const mode = () => {
+    armOverlay();
     setInput('');
     setMsg('');
     setCursor(cursor.slice(0, -1));
   };
-  const modeRoot = () => {setInput(''); setMsg(''); setCursor([]);};
+  const modeRoot = () => {armOverlay(); setInput(''); setMsg(''); setCursor([]);};
   const scroll = (delta: number) => {
+    armOverlay();
     setInput('');
     if (!cursor.length) {
       const len = root.children?.length ?? 0;
@@ -194,6 +231,7 @@ export function VirtualHandbox() {
     setCursor([...cursor.slice(0, -1), idx]);
   };
   const gotoKey = () => {
+    armOverlay();
     if (input) {jumpToInput(true); return;}
     if (!cursor.length) {showMsg(t.hb.msgs.selectTarget); return;}
     if (selected.onGoto) {selected.onGoto(); return;}
@@ -226,6 +264,7 @@ export function VirtualHandbox() {
     if (!n || n < 1 || n > siblings.length) {showMsg(t.hb.msgs.badIndex); return;}
     const target = [...cursor.slice(0, -1), n - 1];
     setCursor(target);
+    armOverlay();
     if (thenGoto) {
       const node = nodeAt(root, target);
       node.onGoto?.();
@@ -235,6 +274,7 @@ export function VirtualHandbox() {
   const typeDigit = (d: number) => {
     const numbered = !cursor.length ? false : (parent.numbered ?? false);
     if (!numbered) {nonDigitAction(d); return;}
+    armOverlay();
     if (input.length < 3) setInput(input + String(d));
   };
 
@@ -249,7 +289,7 @@ export function VirtualHandbox() {
     if (digitMode === 'menuJumps') {
       const jump = (key: string) => {
         const p = findPath(root, key);
-        if (p) {setCursor([...p, 0]); return true;}
+        if (p) {armOverlay(); setCursor([...p, 0]); return true;}
         return false;
       };
       switch (d) {
@@ -287,21 +327,34 @@ export function VirtualHandbox() {
     feedback();
     if (!connected) {showMsg(t.errors.notConnected, 1500); return;}
     activeDirs.current.add(d);
+    autostar.markOwnMove(); // maintien virtuel ≠ mouvement physique
     autostar.startMove(d).catch(() => undefined);
   };
   const dirStop = (d: Dir) => {
     if (!activeDirs.current.has(d)) return;
     activeDirs.current.delete(d);
-    if (connected) autostar.stopMove(d).catch(() => undefined);
+    if (connected) {
+      autostar.markOwnMove(1500); // inertia : dernier delta encore à l'app
+      autostar.stopMove(d).catch(() => undefined);
+    }
   };
 
-  /* ---------- Affichage LCD ---------- */
+  /* ---------- Affichage LCD (mode miroir de la raquette physique) ---------- */
+  const mirrorActive = connected && hbSync === 'live' && !msg && !overlay;
+  // directions constatées SUR LE MATÉRIEL (croix virtuelle allumée en retour)
+  const NO_DIR: Record<Dir, boolean> = {n: false, s: false, e: false, w: false};
+  const phys: Record<Dir, boolean> = connected && hbExternal ? (hbDirs ?? NO_DIR) : NO_DIR;
+  const litDirs: Record<Dir, boolean> = {
+    n: !!phys.n, s: !!phys.s, e: !!phys.e, w: !!phys.w,
+  };
+  const dirGlyph = (d: Dir) => ({n: '▲', s: '▼', e: '▶', w: '◀'} as Record<Dir, string>)[d];
+  const physGlyphs = (['n', 's', 'e', 'w'] as Dir[]).filter((d) => litDirs[d]).map(dirGlyph).join('');
   let line1: string;
   let line2: string;
   if (msg) {
     line1 = msg.slice(0, 16);
     line2 = msg.slice(16, 32);
-  } else if (!cursor.length && connected && hbSync === 'live') {
+  } else if (mirrorActive) {
     // Écran d'observation synchronisé : identique à la raquette physique
     line1 = `RA ${raDegToHMS(raDeg)}`;
     line2 = `DEC ${decDegToDMS(decDeg)}`;
@@ -318,9 +371,12 @@ export function VirtualHandbox() {
   const altAzText = altDeg !== null && azDeg !== null
     ? `ALT ${decDegToDMS(altDeg)}  AZ ${decDegToDMS(azDeg)}`
     : raDecText;
+  const mirrorPrefix = physGlyphs ? `»»${physGlyphs} ` : '';
   const statusText = !connected
     ? 'RA --:--:--  DEC --°--'
-    : cursor.length ? ctxLine : (posView === 'altaz' ? altAzText : raDecText);
+    : mirrorActive
+      ? mirrorPrefix + (posView === 'altaz' ? altAzText : raDecText)
+      : cursor.length ? ctxLine : (posView === 'altaz' ? altAzText : raDecText);
 
   /* ---------- Composants de touches ---------- */
   const CmdKey = ({label, onPress, onLongPress}: {label: string; onPress: () => void; onLongPress?: () => void}) => (
@@ -336,16 +392,19 @@ export function VirtualHandbox() {
     </Pressable>
   );
 
-  const ArrowKey = ({d, label, size = 56}: {d: Dir; label: string; size?: number}) => (
+  const ArrowKey = ({d, label, size = 56, lit = false}: {d: Dir; label: string; size?: number; lit?: boolean}) => (
     <Pressable
       onPressIn={() => dirStart(d)}
       onPressOut={() => dirStop(d)}
       style={({pressed}) => ({
         width: size, height: size, borderRadius: size / 2, justifyContent: 'center', alignItems: 'center',
-        backgroundColor: pressed ? c.btnActive : c.btnBg, borderWidth: 1.5, borderColor: pressed ? c.amber : c.border,
+        backgroundColor: pressed || lit ? c.btnActive : c.btnBg,
+        borderWidth: pressed || lit ? 2.5 : 1.5,
+        borderColor: pressed || lit ? c.amber : c.border,
+        shadowColor: c.amber, shadowOpacity: lit ? 0.9 : 0, shadowRadius: 6,
       })}>
       {({pressed}) => (
-        <Text style={{color: pressed ? c.amber : c.text, fontSize: 22, fontWeight: '700'}}>{label}</Text>
+        <Text style={{color: pressed || lit ? c.amber : c.text, fontSize: 22, fontWeight: '700'}}>{label}</Text>
       )}
     </Pressable>
   );
@@ -410,7 +469,7 @@ export function VirtualHandbox() {
     switch (k.t) {
       case 'gap': return <View key={key} style={{flex: 1}} />;
       case 'spacer': return <View key={key} style={{width: k.w}} />;
-      case 'dir': return <ArrowKey key={key} d={k.dir} label={k.label} />;
+      case 'dir': return <ArrowKey key={key} d={k.dir} label={k.label} lit={litDirs[k.dir]} />;
       case 'digit': return <NumKey key={key} digit={k.digit} sub={k.sub} />;
       case 'act': {
         const label = keyLabel(k);
@@ -507,6 +566,13 @@ export function VirtualHandbox() {
           </Text>
         </Pressable>
         {connected && hbMoving ? <StopPill /> : null}
+        {connected && hbExternal ? (
+          <View style={pillBox('rgba(255,170,60,0.14)', 'rgba(255,170,60,0.6)')}>
+            <Text style={{color: c.amber, fontSize: 10, fontWeight: '800', letterSpacing: 0.5}}>
+              ● {t.hb.sync.phys}
+            </Text>
+          </View>
+        ) : null}
         <SyncPill />
       </View>
       {fwLine ? (

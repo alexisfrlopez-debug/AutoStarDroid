@@ -71,6 +71,8 @@ export const handboxSync = {
     s.setHbSync('off');
     s.setHbError(null);
     s.setHbMoving(false);
+    s.setHbExternal(false);
+    s.setHbDirs(null);
     s.setAltAz(null, null);
   },
 };

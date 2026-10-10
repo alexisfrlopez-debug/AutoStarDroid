@@ -30,6 +30,10 @@ interface ScopeState {
   hbSync: HbSyncStatus; // synchro temps réel du LCD (voir handboxSync.ts)
   hbError: string | null;
   hbMoving: boolean; // la raquette physique est en train de bouger
+  /** Mouvement VENU de la raquette physique (l'app ne bougeait pas elle-même). */
+  hbExternal: boolean;
+  /** Directions déduites du mouvement physique (croix de la raquette virtuelle allumée). */
+  hbDirs: {n: boolean; s: boolean; e: boolean; w: boolean} | null;
   altDeg: number | null; // lu en direct (:Ga) quand la synchro est active
   azDeg: number | null; // lu en direct (:Gz)
   scopeTime: string; // 'HH:MM:SS' lu sur la raquette
@@ -46,6 +50,8 @@ interface ScopeState {
   setHbSync: (s: HbSyncStatus) => void;
   setHbError: (e: string | null) => void;
   setHbMoving: (m: boolean) => void;
+  setHbExternal: (x: boolean) => void;
+  setHbDirs: (d: {n: boolean; s: boolean; e: boolean; w: boolean} | null) => void;
   setAltAz: (altDeg: number | null, azDeg: number | null) => void;
   setScopeTime: (t: string) => void;
   setScopeDate: (d: string) => void;
@@ -70,6 +76,8 @@ const initial = {
   hbSync: 'off' as HbSyncStatus,
   hbError: null as string | null,
   hbMoving: false,
+  hbExternal: false,
+  hbDirs: null as ScopeState['hbDirs'],
   altDeg: null as number | null,
   azDeg: null as number | null,
   scopeTime: '--:--:--',
@@ -91,6 +99,8 @@ export const useScopeStore = create<ScopeState>((set) => ({
   setHbSync: (hbSync) => set({hbSync}),
   setHbError: (hbError) => set({hbError}),
   setHbMoving: (hbMoving) => set({hbMoving}),
+  setHbExternal: (hbExternal) => set({hbExternal}),
+  setHbDirs: (hbDirs) => set({hbDirs}),
   setAltAz: (altDeg, azDeg) => set({altDeg, azDeg}),
   setScopeTime: (scopeTime) => set({scopeTime}),
   setScopeDate: (scopeDate) => set({scopeDate}),

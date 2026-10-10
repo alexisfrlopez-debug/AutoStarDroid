@@ -106,7 +106,7 @@ export const en = {
   hb: {
     title: 'Handbox',
     tabKeypad: 'Handbox', tabStation: 'Polar align',
-    keypadHelp: 'Arrows: hold to slew · command keys scroll menus · MODE long-press = top · digits = entry / shortcuts',
+    keypadHelp: 'Arrows: hold to slew · menus: 5 s preview, then back to the physical handbox screen · MODE long-press = top · digits = entry / shortcuts',
     helpGeneric: 'Autostar Droid — press ? on any item for help',
     keys: {mode: 'MODE', enter: 'ENTER', goto: 'GO TO', help: '?'},
     fw: {
@@ -117,6 +117,7 @@ export const en = {
     sync: {
       na: 'SYNC —', off: 'SYNC OFF', live: 'LIVE', retry: 'RESTART',
       stopped: 'Real-time sync stopped', restarted: 'Real-time sync restarted',
+      phys: 'PHYSICAL',
     },
     msgs: {
       noObject: 'Object unreachable', syncing: 'Sending date/time/site…',

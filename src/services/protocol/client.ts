@@ -59,11 +59,27 @@ function parseRa(s: string): number | null {
   return (+m[1] + +m[2] / 60 + +m[3] / 3600) * 15;
 }
 
+/**
+ * Format attendu des réponses, par commande. Sert à rejeter une réponse
+ * « en retard » d'une commande expirée (raquette occupée pendant un moteur)
+ * qui sinon serait attribuée à la commande suivante et empoisonnerait la
+ * synchro : une réponse qui ne colle pas au format attendu est jetée, la
+ * vraie réponse qui suit est acceptée normalement.
+ */
+const VALID = {
+  ra: /^\d{1,2}:\d{2}/,          // :Gr# :GL#  → "HH:MM:SS" ou "HH:MM.T"
+  dec: /^[+-]?\d{1,3}[°*]/,      // :Gd# :Ga# :Gz# :Gt# :Gg# → "sDD*MM"
+  date: /^\d{1,2}\/\d{1,2}/,     // :GC# → "MM/JJ/AA"
+  tz: /^[+-]?\d/,                // :GG# → heures de décalage
+  bit: /^[01]$/,                 // :Sr# :Sd# → validé/refusé
+  digit: /^\d/,                  // :MS# → 0/1/2
+} as const;
+
 export class AutostarClient {
   private transport: Transport | null = null;
   private queue: Promise<unknown> = Promise.resolve();
   private buffer = '';
-  private pending: {cmd: string; resolve: (s: string) => void; reject: (e: Error) => void; timer: number} | null = null;
+  private pending: {cmd: string; expect?: RegExp; resolve: (s: string) => void; reject: (e: Error) => void; timer: number} | null = null;
   private pollTimer: number | null = null;
   private pollIntervalMs = 1200;
   private pollAltAzOn = false;
@@ -72,6 +88,14 @@ export class AutostarClient {
   private failCount = 0;
   private lastRaDeg: number | null = null;
   private lastDecDeg: number | null = null;
+  /** Fenêtre pendant laquelle un mouvement est attribué à L'APP (commandes
+   *  :Mn…/:MS# qu'elle vient d'envoyer) — hors fenêtre, le mouvement constaté
+   *  vient de la raquette physique. */
+  private ownMoveUntil = 0;
+  /** Dernier cycle où la position bougeait (tolérance : beaucoup de raquettes
+   *  ne répondent pas au port série pendant un moteur). */
+  private lastMovedFlag = false;
+  private lastExternalAt = 0;
   private log = (dir: 'sent' | 'recv' | 'info' | 'error', text: string) =>
     useScopeStore.getState().pushLog(dir, text);
 
@@ -98,6 +122,9 @@ export class AutostarClient {
       const s = useScopeStore.getState();
       s.setConnStatus('disconnected');
       s.setFirmware(null, null, null);
+      s.setHbMoving(false);
+      s.setHbExternal(false);
+      s.setHbDirs(null);
       s.pushLog('info', 'Liaison fermée');
       handboxSync.reset();
     });
@@ -177,34 +204,43 @@ export class AutostarClient {
   private onData(chunk: string) {
     this.buffer += chunk;
     if (this.buffer.length > 4096) this.buffer = this.buffer.slice(-2048);
-    const p = this.pending;
-    if (p) {
+    // traite toutes les réponses complètes disponibles : après une réponse
+    // périmée jetée, la vraie réponse peut déjà attendre dans le tampon
+    let guard = 0;
+    while (this.pending && guard++ < 32) {
+      const p = this.pending;
       // gestion d'écho : la raquette peut renvoyer la commande telle quelle
       let buf = this.buffer;
       if (buf.startsWith(p.cmd)) buf = buf.slice(p.cmd.length);
       const i = buf.indexOf('#');
-      if (i >= 0) {
-        const reply = buf.slice(0, i);
-        this.buffer = buf.slice(i + 1);
-        clearTimeout(p.timer);
-        this.pending = null;
-        if (reply.length) this.log('recv', reply);
-        p.resolve(reply);
+      if (i < 0) break;
+      const reply = buf.slice(0, i);
+      this.buffer = buf.slice(i + 1);
+      if (p.expect && !p.expect.test(reply)) {
+        // réponse hors format = réponse en retard d'une commande déjà
+        // expirée : jetée, la vraie réponse pourra arriver derrière
+        this.log('info', `Réponse hors attente ignorée (« ${reply} »)`);
+        continue;
       }
+      clearTimeout(p.timer);
+      this.pending = null;
+      if (reply.length) this.log('recv', reply);
+      p.resolve(reply);
     }
   }
 
-  /** Envoie une commande et attend une réponse '#'-terminée. */
-  cmd(command: string, timeoutMs = 3000): Promise<string> {
+  /** Envoie une commande et attend une réponse '#'-terminée (format vérifié). */
+  cmd(command: string, timeoutMs = 3000, expect?: RegExp): Promise<string> {
     if (!this.transport) return Promise.reject(new TransportError('Non connecté'));
     const run = () =>
       new Promise<string>((resolve, reject) => {
         if (!this.transport) return reject(new TransportError('Non connecté'));
         const timer = setTimeout(() => {
           this.pending = null;
+          this.buffer = '';
           reject(new TransportError(`Délai dépassé : ${command}`));
         }, timeoutMs) as unknown as number;
-        this.pending = {cmd: command, resolve, reject, timer};
+        this.pending = {cmd: command, expect, resolve, reject, timer};
         this.buffer = '';
         this.log('sent', command);
         this.transport.write(command).catch((e) => {
@@ -233,7 +269,7 @@ export class AutostarClient {
   /* ---------- API haut niveau ---------- */
 
   async getRaDec(timeoutMs = 3000): Promise<RaDec> {
-    const [ra, dec] = await Promise.all([this.cmd(':Gr#', timeoutMs), this.cmd(':Gd#', timeoutMs)]);
+    const [ra, dec] = await Promise.all([this.cmd(':Gr#', timeoutMs, VALID.ra), this.cmd(':Gd#', timeoutMs, VALID.dec)]);
     const raDeg = parseRa(ra);
     const decDeg = parseDec(dec);
     if (raDeg === null || decDeg === null) throw new TransportError('Réponse position illisible');
@@ -253,23 +289,34 @@ export class AutostarClient {
   async startMove(dir: Dir) {
     const map: Record<Dir, string> = {n: ':Mn#', s: ':Ms#', e: ':Me#', w: ':Mw#'};
     await this.cmdSilent(map[dir]);
+    this.ownMoveUntil = Date.now() + 2500; // mouvement attribué à l'app
+  }
+
+  /** Marque le mouvement en cours comme initié par l'app (flèche virtuelle
+   *  tenue au-delà de la fenêtre de startMove — sinon il serait attribué à
+   *  la raquette physique). */
+  markOwnMove(holdMs = 30000) {
+    this.ownMoveUntil = Math.max(this.ownMoveUntil, Date.now() + holdMs);
   }
 
   async stopMove(dir: Dir) {
     const map: Record<Dir, string> = {n: ':Qn#', s: ':Qs#', e: ':Qe#', w: ':Qw#'};
     await this.cmdSilent(map[dir]);
+    this.ownMoveUntil = Date.now() + 1200;
   }
 
   async stopAll() {
     await this.cmdSilent(':Q#');
+    this.ownMoveUntil = Date.now() + 1200;
   }
 
   /** GOTO vers RA/Dec. Renvoie 'ok' ou un message d'erreur localisé. */
   async gotoRaDec(raDeg: number, decDeg: number): Promise<'ok' | 'belowHorizon' | 'noObject' | 'refused'> {
-    const r1 = await this.cmd(`:Sr${proto.raCmd(raDeg)}#`);
-    const r2 = await this.cmd(`:Sd${proto.decCmd(decDeg)}#`);
+    const r1 = await this.cmd(`:Sr${proto.raCmd(raDeg)}#`, 3000, VALID.bit);
+    const r2 = await this.cmd(`:Sd${proto.decCmd(decDeg)}#`, 3000, VALID.bit);
     if (r1 !== '1' || r2 !== '1') return 'refused';
-    const ms = await this.cmd(':MS#', 5000);
+    const ms = await this.cmd(':MS#', 5000, VALID.digit);
+    this.ownMoveUntil = Date.now() + 45000; // GOTO : slew possiblement long
     if (ms === '0') return 'ok';
     if (ms === '1') return 'belowHorizon';
     return 'noObject';
@@ -284,8 +331,10 @@ export class AutostarClient {
     time: string; date: string; tz: string; latDeg: number | null; lonDeg: number | null;
   }> {
     const [time, date, tz, lat, lon] = await Promise.all([
-      this.cmd(':GL#'), this.cmd(':GC#'), this.cmd(':GG#'),
-      this.cmd(':Gt#').catch(() => ''), this.cmd(':Gg#').catch(() => ''),
+      this.cmd(':GL#', 3000, VALID.ra), this.cmd(':GC#', 3000, VALID.date),
+      this.cmd(':GG#', 3000, VALID.tz),
+      this.cmd(':Gt#', 3000, VALID.dec).catch(() => ''),
+      this.cmd(':Gg#', 3000, VALID.dec).catch(() => ''),
     ]);
     return {time, date, tz, latDeg: parseDec(lat), lonDeg: parseDec(lon)};
   }
@@ -366,15 +415,33 @@ export class AutostarClient {
       if (this.pollBusy || !this.isConnected()) return;
       this.pollBusy = true;
       try {
-        const {raDeg, decDeg} = await this.getRaDec(1200);
+        const {raDeg, decDeg} = await this.getRaDec(2500);
         this.failCount = 0;
         const s = useScopeStore.getState();
         // détection de mouvement : la position physique a bougé depuis le
         // dernier cycle (seuil ~10" entre 2 lectures)
         const moved = this.lastRaDeg !== null && this.lastDecDeg !== null &&
           (Math.abs(raDeg - this.lastRaDeg) + Math.abs(decDeg - this.lastDecDeg)) > 0.0028;
+        // attribution : hors de la fenêtre « l'app vient d'ordonner un
+        // mouvement », tout déplacement constaté VIENT DE LA RAQUETTE
+        // PHYSIQUE → croix allumée + directions déduites des deltas AD/DEC
+        const external = moved && Date.now() > this.ownMoveUntil &&
+          this.lastRaDeg !== null && this.lastDecDeg !== null;
+        let dirs: {n: boolean; s: boolean; e: boolean; w: boolean} | null = null;
+        if (external) {
+          let dRa = raDeg - (this.lastRaDeg as number);
+          if (dRa > 180) dRa -= 360; else if (dRa < -180) dRa += 360; // raccord 0h
+          const dDec = decDeg - (this.lastDecDeg as number);
+          const th = 0.0014; // ~5" : moitié du seuil de mouvement
+          dirs = {n: dDec > th, s: dDec < -th, e: dRa > th, w: dRa < -th};
+          if (!dirs.n && !dirs.s && !dirs.e && !dirs.w) dirs = null;
+          this.lastExternalAt = Date.now();
+        }
         s.setPosition(raDeg, decDeg);
         s.setHbMoving(moved);
+        s.setHbExternal(external);
+        s.setHbDirs(dirs);
+        this.lastMovedFlag = moved;
         this.lastRaDeg = raDeg;
         this.lastDecDeg = decDeg;
         this.pollTick += 1;
@@ -382,7 +449,11 @@ export class AutostarClient {
           this.pollAltAz().catch(() => undefined); // tolérant : modèles sans :Ga
         }
       } catch (e) {
-        this.failCount += 1;
+        // Pendant un moteur (slew de la raquette physique ou GOTO), beaucoup
+        // de raquettes cessent de répondre au port série : ce n'est PAS une
+        // panne de synchro — on tolère et on retente au tick suivant.
+        const busy = this.lastMovedFlag || Date.now() - this.lastExternalAt < 3000;
+        if (!busy) this.failCount += 1;
         if (this.failCount >= 3) {
           this.failCount = 0;
           const s = useScopeStore.getState();
@@ -391,6 +462,8 @@ export class AutostarClient {
             s.setHbSync('error');
             s.setHbError((e as Error).message);
             s.setHbMoving(false);
+            s.setHbExternal(false);
+            s.setHbDirs(null);
             this.setPollInterval(2000);
             this.setPollAltAz(false);
             s.pushLog('error', `Synchro temps réel interrompue : ${(e as Error).message}`);
@@ -404,8 +477,8 @@ export class AutostarClient {
 
   private async pollAltAz() {
     const [alt, az] = await Promise.all([
-      this.cmd(':Ga#', 1500).catch(() => ''),
-      this.cmd(':Gz#', 1500).catch(() => ''),
+      this.cmd(':Ga#', 2500, VALID.dec).catch(() => ''),
+      this.cmd(':Gz#', 2500, VALID.dec).catch(() => ''),
     ]);
     const altDeg = parseDec(alt.trim().match(/^[+-]/) ? alt : `+${alt}`);
     const azDeg = parseDec(az.trim().match(/^[+-]/) ? az : `+${az}`);
