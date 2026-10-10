@@ -3,6 +3,8 @@ import type {ScopeModelId} from './settingsStore';
 import type {TransportType} from '../services/connection/types';
 
 export type ConnStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
+/** État de la synchronisation temps réel raquette virtuelle ↔ physique. */
+export type HbSyncStatus = 'off' | 'live' | 'error';
 
 export interface LogLine {
   ts: number;
@@ -21,6 +23,11 @@ interface ScopeState {
   targetName: string;
   speed: 'guide' | 'center' | 'find' | 'slew';
   alignMode: 'altaz' | 'polar' | 'land' | 'unknown';
+  hbSync: HbSyncStatus; // synchro temps réel du LCD (voir handboxSync.ts)
+  hbError: string | null;
+  hbMoving: boolean; // la raquette physique est en train de bouger
+  altDeg: number | null; // lu en direct (:Ga) quand la synchro est active
+  azDeg: number | null; // lu en direct (:Gz)
   scopeTime: string; // 'HH:MM:SS' lu sur la raquette
   scopeDate: string; // 'MM/JJ/AA'
   log: LogLine[];
@@ -31,6 +38,10 @@ interface ScopeState {
   setTarget: (raDeg: number, decDeg: number, name: string) => void;
   setSpeed: (s: ScopeState['speed']) => void;
   setAlignMode: (m: ScopeState['alignMode']) => void;
+  setHbSync: (s: HbSyncStatus) => void;
+  setHbError: (e: string | null) => void;
+  setHbMoving: (m: boolean) => void;
+  setAltAz: (altDeg: number | null, azDeg: number | null) => void;
   setScopeTime: (t: string) => void;
   setScopeDate: (d: string) => void;
   pushLog: (dir: LogLine['dir'], text: string) => void;
@@ -48,6 +59,11 @@ const initial = {
   targetName: '',
   speed: 'center' as ScopeState['speed'],
   alignMode: 'unknown' as ScopeState['alignMode'],
+  hbSync: 'off' as HbSyncStatus,
+  hbError: null as string | null,
+  hbMoving: false,
+  altDeg: null as number | null,
+  azDeg: null as number | null,
   scopeTime: '--:--:--',
   scopeDate: '--/--/--',
   log: [] as LogLine[],
@@ -63,6 +79,10 @@ export const useScopeStore = create<ScopeState>((set) => ({
     set({targetRaDeg, targetDecDeg, targetName}),
   setSpeed: (speed) => set({speed}),
   setAlignMode: (alignMode) => set({alignMode}),
+  setHbSync: (hbSync) => set({hbSync}),
+  setHbError: (hbError) => set({hbError}),
+  setHbMoving: (hbMoving) => set({hbMoving}),
+  setAltAz: (altDeg, azDeg) => set({altDeg, azDeg}),
   setScopeTime: (scopeTime) => set({scopeTime}),
   setScopeDate: (scopeDate) => set({scopeDate}),
   pushLog: (dir, text) =>

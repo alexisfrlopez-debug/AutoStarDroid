@@ -102,6 +102,10 @@ export const fr: Dict = {
     keypadHelp: 'Flèches : maintenir pour pointer · ▲▼ défilement · MODE appui long = accueil · chiffres = vitesse / n° de liste',
     helpGeneric: 'AutoStar Droid — touche ? pour l’aide de chaque item',
     keys: {mode: 'MODE', enter: 'ENTER', goto: 'GO TO', help: '?'},
+    sync: {
+      na: 'SYNCHRO —', off: 'SYNCHRO OFF', live: 'LIVE', retry: 'RELANCER',
+      stopped: 'Synchro temps réel arrêtée', restarted: 'Synchro temps réel relancée',
+    },
     msgs: {
       noObject: 'Objet inaccessible', syncing: 'Envoi date/heure/site…',
       synced: 'Raquette mise à jour', trackSet: 'Mode de suivi appliqué',

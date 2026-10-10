@@ -12,12 +12,15 @@
  *        [0 ☀]
  *   [▲SC][ ? ][▼SC]           <- défilement des menus + aide contextuelle
  *
- * Synchronisation avec la raquette réelle : position AD/DEC relue en
- * continu (polling), vitesse et mode d'alignement issus de l'état raquette,
- * GOTO/vitesse/focus exécutés par le protocole. Les touches de navigation
- * (MENU/ENTER/MODE/défilement) pilotent le modèle de menus local, comme
- * sur le matériel — le port série d'une raquette ne transmettant pas
- * ces touches.
+ * Synchronisation temps réel avec la raquette réelle : quand elle est ACTIVE
+ * (par défaut à la connexion), le LCD affiche en continu le même écran
+ * d'observation que la raquette physique (AD/DEC relues toutes les 500 ms,
+ * alt/az toutes les 2 s, indicateur de mouvement) ; le bouton SYNCHRO sous
+ * l'écran permet de la désactiver (retour au menu local) ou de la relancer
+ * (appui long quand LIVE, appui direct quand elle est en erreur). Les touches
+ * de navigation (MENU/ENTER/MODE/défilement) pilotent le modèle de menus
+ * local, comme sur le matériel — le port série d'une raquette ne transmet
+ * pas ces touches.
  */
 import {useEffect, useMemo, useRef, useState} from 'react';
 import {Pressable, Text, View, Vibration} from 'react-native';
@@ -25,6 +28,7 @@ import {useT} from '../i18n';
 import {useSettingsStore} from '../store/settingsStore';
 import {useScopeStore} from '../store/scopeStore';
 import {autostar, type Dir} from '../services/protocol/client';
+import {handboxSync, SYNC_FAST_MS} from '../services/protocol/handboxSync';
 import {LcdPanel} from './LcdPanel';
 import {usePal} from './ui';
 import {
@@ -54,10 +58,15 @@ export function VirtualHandbox() {
   const decDeg = useScopeStore((s) => s.decDeg);
   const speed = useScopeStore((s) => s.speed);
   const alignMode = useScopeStore((s) => s.alignMode);
+  const hbSync = useScopeStore((s) => s.hbSync);
+  const hbMoving = useScopeStore((s) => s.hbMoving);
+  const altDeg = useScopeStore((s) => s.altDeg);
+  const azDeg = useScopeStore((s) => s.azDeg);
 
   const [cursor, setCursor] = useState<number[]>([]);
   const [input, setInput] = useState('');
   const [msg, setMsg] = useState('');
+  const [posView, setPosView] = useState<'radec' | 'altaz'>('radec');
   const timers = useRef<number[]>([]);
   useEffect(() => () => {timers.current.forEach((id) => clearTimeout(id));}, []);
   const later = (fn: () => void, ms: number) => {
@@ -261,6 +270,10 @@ export function VirtualHandbox() {
   if (msg) {
     line1 = msg.slice(0, 16);
     line2 = msg.slice(16, 32);
+  } else if (!cursor.length && connected && hbSync === 'live') {
+    // Écran d'observation synchronisé : identique à la raquette physique
+    line1 = `RA ${raDegToHMS(raDeg)}`;
+    line2 = `DEC ${decDegToDMS(decDeg)}`;
   } else if (!cursor.length) {
     line1 = 'Select Item';
     line2 = '> ' + (root.children?.[0]?.line1 ?? '');
@@ -269,7 +282,14 @@ export function VirtualHandbox() {
     line2 = '> ' + (input ? input + '_' : (selected.line1 ?? ''));
   }
   const ctxLine = selected.line2 ?? '';
-  const livePos = `${raDegToHMS(raDeg)}  ${decDegToDMS(decDeg)}`;
+  // Ligne de télémétrie sous l'écran (appui = bascule AD/DEC ↔ Alt/Az)
+  const raDecText = `${hbMoving ? '»' : ' '}${raDegToHMS(raDeg)}  ${decDegToDMS(decDeg)}`;
+  const altAzText = altDeg !== null && azDeg !== null
+    ? `ALT ${decDegToDMS(altDeg)}  AZ ${decDegToDMS(azDeg)}`
+    : raDecText;
+  const statusText = !connected
+    ? 'RA --:--:--  DEC --°--'
+    : cursor.length ? ctxLine : (posView === 'altaz' ? altAzText : raDecText);
 
   /* ---------- Composants de touches ---------- */
   const CmdKey = ({label, onPress, onLongPress}: {label: string; onPress: () => void; onLongPress?: () => void}) => (
@@ -317,17 +337,65 @@ export function VirtualHandbox() {
 
   const dual = model === 'autostar2' || model === 'lx200';
 
+  /* ---------- Bouton de synchronisation temps réel ---------- */
+  const pillBox = (bg: string, border: string) => ({
+    height: 26, borderRadius: 13, justifyContent: 'center' as const, alignItems: 'center' as const,
+    backgroundColor: bg, borderWidth: 1, borderColor: border, paddingHorizontal: 10, marginLeft: 8,
+  });
+  const SyncPill = () => {
+    if (!connected) {
+      return (
+        <View style={pillBox(c.btnBg, c.border)}>
+          <Text style={{color: c.textFaint, fontSize: 10, fontWeight: '700', letterSpacing: 0.5}}>{t.hb.sync.na}</Text>
+        </View>
+      );
+    }
+    if (hbSync === 'live') {
+      return (
+        <Pressable
+          onPress={() => {feedback(); handboxSync.disable(); showMsg(t.hb.sync.stopped, 2200);}}
+          onLongPress={() => {feedback(); handboxSync.restart(); showMsg(t.hb.sync.restarted, 2200);}}
+          delayLongPress={600}
+          style={({pressed}) => pillBox(pressed ? c.btnActive : 'rgba(63,214,140,0.12)', pressed ? c.amber : 'rgba(63,214,140,0.55)')}>
+          <Text style={{color: c.green, fontSize: 10, fontWeight: '800', letterSpacing: 0.5}}>
+            ● {t.hb.sync.live} {SYNC_FAST_MS / 1000}s
+          </Text>
+        </Pressable>
+      );
+    }
+    if (hbSync === 'error') {
+      return (
+        <Pressable
+          onPress={() => {feedback(); handboxSync.restart();}}
+          style={({pressed}) => pillBox(pressed ? c.btnActive : 'rgba(255,93,93,0.12)', 'rgba(255,93,93,0.55)')}>
+          <Text style={{color: c.red, fontSize: 10, fontWeight: '800', letterSpacing: 0.5}}>
+            ⟳ {t.hb.sync.retry}
+          </Text>
+        </Pressable>
+      );
+    }
+    return (
+      <Pressable
+        onPress={() => {feedback(); if (!handboxSync.enable()) showMsg(t.errors.notConnected, 2000);}}
+        style={({pressed}) => pillBox(pressed ? c.btnActive : c.btnBg, c.border)}>
+        <Text style={{color: c.textDim, fontSize: 10, fontWeight: '700', letterSpacing: 0.5}}>{t.hb.sync.off}</Text>
+      </Pressable>
+    );
+  };
+
   return (
     <View>
       {/* LCD + état live de la raquette réelle */}
       <LcdPanel line1={line1} line2={line2} />
-      <View style={{flexDirection: 'row', justifyContent: 'space-between', marginTop: 6, paddingHorizontal: 2}}>
-        <Text style={{color: c.textDim, fontSize: 11, fontFamily: 'monospace'}}>
-          {connected ? livePos : 'AD --:--:--  DEC --°--'}
-        </Text>
-        <Text style={{color: c.textFaint, fontSize: 11}}>
-          {ctxLine}
-        </Text>
+      <View style={{flexDirection: 'row', alignItems: 'center', marginTop: 6, paddingHorizontal: 2}}>
+        <Pressable
+          onPress={() => setPosView((v) => (v === 'radec' ? 'altaz' : 'radec'))}
+          style={{flex: 1}}>
+          <Text style={{color: c.textDim, fontSize: 11, fontFamily: 'monospace'}} numberOfLines={1}>
+            {statusText}
+          </Text>
+        </Pressable>
+        <SyncPill />
       </View>
 
       {/* Rangée de commandes — ordre physique : ENTER MODE GO TO */}

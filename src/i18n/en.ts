@@ -100,6 +100,10 @@ export const en = {
     keypadHelp: 'Arrows: hold to slew · ▲▼ scroll menus · MODE long-press = top · digits = speed / list index',
     helpGeneric: 'Autostar Droid — press ? on any item for help',
     keys: {mode: 'MODE', enter: 'ENTER', goto: 'GO TO', help: '?'},
+    sync: {
+      na: 'SYNC —', off: 'SYNC OFF', live: 'LIVE', retry: 'RESTART',
+      stopped: 'Real-time sync stopped', restarted: 'Real-time sync restarted',
+    },
     msgs: {
       noObject: 'Object unreachable', syncing: 'Sending date/time/site…',
       synced: 'Handbox updated', trackSet: 'Tracking mode set',

@@ -39,6 +39,13 @@ export class AutostarClient {
   private buffer = '';
   private pending: {cmd: string; resolve: (s: string) => void; reject: (e: Error) => void; timer: number} | null = null;
   private pollTimer: number | null = null;
+  private pollIntervalMs = 1200;
+  private pollAltAzOn = false;
+  private pollTick = 0;
+  private pollBusy = false;
+  private failCount = 0;
+  private lastRaDeg: number | null = null;
+  private lastDecDeg: number | null = null;
   private log = (dir: 'sent' | 'recv' | 'info' | 'error', text: string) =>
     useScopeStore.getState().pushLog(dir, text);
 
@@ -64,6 +71,7 @@ export class AutostarClient {
       this.stopPoll();
       useScopeStore.getState().setConnStatus('disconnected');
       useScopeStore.getState().pushLog('info', 'Liaison fermée');
+      handboxSync.reset();
     });
     try {
       await transport.connect(opts);
@@ -85,6 +93,7 @@ export class AutostarClient {
     this.log('info', `Connecté (${transport.type}, modèle ${model})`);
     if (transport.type === 'demo') setDemoSite(0, 0); // site ajusté par les écrans
     this.startPoll();
+    handboxSync.enable(); // synchro temps réel par défaut dès la connexion
   }
 
   async disconnect(): Promise<void> {
@@ -162,8 +171,8 @@ export class AutostarClient {
 
   /* ---------- API haut niveau ---------- */
 
-  async getRaDec(): Promise<RaDec> {
-    const [ra, dec] = await Promise.all([this.cmd(':Gr#'), this.cmd(':Gd#')]);
+  async getRaDec(timeoutMs = 3000): Promise<RaDec> {
+    const [ra, dec] = await Promise.all([this.cmd(':Gr#', timeoutMs), this.cmd(':Gd#', timeoutMs)]);
     const raDeg = parseRa(ra);
     const decDeg = parseDec(dec);
     if (raDeg === null || decDeg === null) throw new TransportError('Réponse position illisible');
@@ -269,17 +278,74 @@ export class AutostarClient {
     await this.cmdSilent(':hP#');
   }
 
-  /* ---------- polling position ---------- */
+  /* ---------- polling position (synchro temps réel) ---------- */
+
+  /** Cadence du polling : 500 ms (synchro live) ou 2000 ms (fond). */
+  setPollInterval(ms: number) {
+    this.pollIntervalMs = ms;
+    if (this.pollTimer !== null) this.startPoll(); // redémarre à la nouvelle cadence
+  }
+
+  /** Active/désactive la lecture alt/az en direct (:Ga/:Gz, 1 fois sur 4). */
+  setPollAltAz(on: boolean) {
+    this.pollAltAzOn = on;
+    this.pollTick = 0;
+  }
 
   private startPoll() {
     this.stopPoll();
     this.pollTimer = setInterval(async () => {
-      if (!this.isConnected()) return;
+      // si le cycle précédent n'est pas terminé (raquette lente/muette), on
+      // saute ce tick : aucune commande ne s'empile dans la file série
+      if (this.pollBusy || !this.isConnected()) return;
+      this.pollBusy = true;
       try {
-        const {raDeg, decDeg} = await this.getRaDec();
-        useScopeStore.getState().setPosition(raDeg, decDeg);
-      } catch (_) {/* silencieux : poll */}
-    }, 1200) as unknown as number;
+        const {raDeg, decDeg} = await this.getRaDec(1200);
+        this.failCount = 0;
+        const s = useScopeStore.getState();
+        // détection de mouvement : la position physique a bougé depuis le
+        // dernier cycle (seuil ~10" entre 2 lectures)
+        const moved = this.lastRaDeg !== null && this.lastDecDeg !== null &&
+          (Math.abs(raDeg - this.lastRaDeg) + Math.abs(decDeg - this.lastDecDeg)) > 0.0028;
+        s.setPosition(raDeg, decDeg);
+        s.setHbMoving(moved);
+        this.lastRaDeg = raDeg;
+        this.lastDecDeg = decDeg;
+        this.pollTick += 1;
+        if (this.pollAltAzOn && this.pollTick % 4 === 0) {
+          this.pollAltAz().catch(() => undefined); // tolérant : modèles sans :Ga
+        }
+      } catch (e) {
+        this.failCount += 1;
+        if (this.failCount >= 3) {
+          this.failCount = 0;
+          const s = useScopeStore.getState();
+          if (s.hbSync === 'live') {
+            // la raquette ne répond plus : synchro en erreur, retour au fond lent
+            s.setHbSync('error');
+            s.setHbError((e as Error).message);
+            s.setHbMoving(false);
+            this.setPollInterval(2000);
+            this.setPollAltAz(false);
+            s.pushLog('error', `Synchro temps réel interrompue : ${(e as Error).message}`);
+          }
+        }
+      } finally {
+        this.pollBusy = false;
+      }
+    }, this.pollIntervalMs) as unknown as number;
+  }
+
+  private async pollAltAz() {
+    const [alt, az] = await Promise.all([
+      this.cmd(':Ga#', 1500).catch(() => ''),
+      this.cmd(':Gz#', 1500).catch(() => ''),
+    ]);
+    const altDeg = parseDec(alt.trim().match(/^[+-]/) ? alt : `+${alt}`);
+    const azDeg = parseDec(az.trim().match(/^[+-]/) ? az : `+${az}`);
+    if (altDeg !== null && azDeg !== null) {
+      useScopeStore.getState().setAltAz(altDeg, azDeg);
+    }
   }
 
   private stopPoll() {
@@ -296,3 +362,6 @@ function sleep(ms: number) {
 
 /** Instance unique partagée. */
 export const autostar = new AutostarClient();
+
+// import en fin de fichier pour éviter la dépendance circulaire
+import {handboxSync} from './handboxSync';

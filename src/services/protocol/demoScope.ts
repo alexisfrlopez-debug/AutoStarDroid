@@ -108,7 +108,7 @@ export class DemoScopeBrain {
         return this.dms(this.decDeg) + '#';
       case c === ':Gz':
         return this.dms(raDecToAltAz(this.raDeg, this.decDeg, this.site.latDeg, this.site.lonDeg, new Date()).azDeg) + '#';
-      case c === ':Galt':
+      case c === ':Galt' || c === ':Ga':
         return this.dms(raDecToAltAz(this.raDeg, this.decDeg, this.site.latDeg, this.site.lonDeg, new Date()).altDeg) + '#';
       case c === ':GL': {
         const d = new Date(Date.now() - this.tzOffset * 3600e3);
