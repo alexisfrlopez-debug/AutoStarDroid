@@ -1,0 +1,21 @@
+pluginManagement { includeBuild("../node_modules/@react-native/gradle-plugin") }
+plugins { id("com.facebook.react.settings") }
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
+    repositories {
+        google()
+        mavenCentral()
+        maven { url 'https://www.jitpack.io' }
+    }
+}
+
+rootProject.name = 'AutoStarDroid'
+
+// Autolinking RN 0.75 : génère build/generated/autolinking/autolinking.json via le CLI
+reactSettings.autolinkLibrariesFromCommand()
+
+include ':app'
+// Nécessaire en PLUS de pluginManagement (ligne 1) : ce second includeBuild fournit
+// les artefacts de classpath buildscript (react-native-gradle-plugin, versions AGP/Kotlin).
+includeBuild('../node_modules/@react-native/gradle-plugin')

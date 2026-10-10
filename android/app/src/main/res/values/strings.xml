@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">AutoStar Droid</string>
+    <string name="share_crash_log">Envoyer le rapport d\'incident</string>
+    <string name="crash_saved_downloads">Rapport d\'incident enregistré dans Téléchargements (autostardroid-crash.log)</string>
+</resources>

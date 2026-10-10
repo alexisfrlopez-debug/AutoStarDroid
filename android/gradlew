@@ -1,0 +1,4 @@
+#!/bin/sh
+# Wrapper de compatibilité : utilise le Gradle installé sur le système
+# (dans ce projet le binaire Gradle est installé dans ANDROID_TOOLS/gradle)
+command -v gradle >/dev/null 2>&1 && exec gradle "$@" || { echo "gradle introuvable dans le PATH"; exit 1; }

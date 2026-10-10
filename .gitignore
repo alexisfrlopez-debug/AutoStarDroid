@@ -1,0 +1,41 @@
+# --- Node / React Native ---
+node_modules/
+npm-debug.log
+yarn-error.log
+*.tsbuildinfo
+
+# --- Metro / bundler ---
+.metro-health-check*
+.bundle/
+
+# --- Build Android ---
+android/app/build/
+android/build/
+android/.gradle/
+*.apk
+*.aab
+android/app/src/main/assets/
+
+# --- Gradle local ---
+local.properties
+.gradle/
+build/
+
+# --- IDE ---
+.idea/
+.vscode/
+*.iml
+
+# --- macOS / OS ---
+.DS_Store
+Thumbs.db
+
+# --- Signage : clé de signature personnelle (JAMAIS dans git) ---
+android/app/debug.keystore
+
+# --- Journaux de debug ---
+crash.log
+*.log
+
+# --- Sources de données volumineuses téléchargées par gen_catalogs.py ---
+scripts/data/

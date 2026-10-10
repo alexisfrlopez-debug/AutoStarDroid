@@ -1,0 +1,12 @@
+#!/bin/bash
+# Exemple d'environnement de build Android pour AutoStar Droid.
+# Copier vers build_env.sh puis adapter les chemins à votre machine :
+#   cp scripts/build_env.sh.example scripts/build_env.sh && source scripts/build_env.sh
+#
+# Prérequis (voir README) : JDK 17, SDK platform 34, build-tools 34.0.0,
+# NDK 26.1.10909125, CMake 3.22.1, Gradle 8.8.
+
+#export ANDROID_HOME="$HOME/Android/Sdk"                  # SDK Android
+#export JAVA_HOME="/usr/lib/jvm/temurin-17-jdk-amd64"     # JDK 17 complet (jlink requis)
+#export PATH="$JAVA_HOME/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+#export GRADLE_OPTS="-Dorg.gradle.daemon=false"

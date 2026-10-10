@@ -1,0 +1,37 @@
+{
+  "name": "autostardroid",
+  "version": "1.0.2",
+  "private": true,
+  "displayName": "AutoStar Droid",
+  "scripts": {
+    "start": "react-native start",
+    "android": "react-native run-android",
+    "bundle": "react-native bundle --platform android --dev false --entry-file index.js --bundle-output android/app/src/main/assets/index.android.bundle --assets-dest android/app/src/main/res",
+    "build:apk": "cd android && gradle assembleRelease",
+    "build:apk:debug": "cd android && gradle assembleDebug"
+  },
+  "dependencies": {
+    "@react-native-async-storage/async-storage": "^1.24.0",
+    "@react-native-community/geolocation": "^3.2.1",
+    "@react-navigation/bottom-tabs": "^6.6.1",
+    "@react-navigation/native": "^6.1.18",
+    "@react-navigation/native-stack": "^6.11.0",
+    "react": "18.3.1",
+    "react-native": "0.75.4",
+    "react-native-safe-area-context": "^4.11.0",
+    "react-native-screens": "^3.34.0",
+    "react-native-tcp-socket": "^6.0.6",
+    "zustand": "^4.5.5"
+  },
+  "devDependencies": {
+    "@react-native-community/cli": "^13.6.9",
+    "@react-native-community/cli-platform-android": "^13.6.9",
+    "@react-native/babel-preset": "0.75.4",
+    "@react-native/metro-config": "0.75.4",
+    "@types/react": "^18.2.6",
+    "typescript": "^5.5.4"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
