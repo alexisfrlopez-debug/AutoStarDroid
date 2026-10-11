@@ -106,7 +106,9 @@ export function VirtualHandbox() {
 
   /** Modèle actif : firmware détecté en priorité, modèle réglé en secours. */
   const model = fwModel ?? settingsModel;
-  const keymap = KEYMAPS[model];
+  // Filet : un modèle non répertorié (firmware exotique) ne doit jamais
+  // rendre `keymap` indéfini — l'onglet Raquette planterait à l'ouverture.
+  const keymap = KEYMAPS[model] ?? KEYMAPS.autostar2;
   const digitMode = keymap.digitMode;
 
   const [cursor, setCursor] = useState<number[]>([]);
@@ -151,6 +153,21 @@ export function VirtualHandbox() {
   const showMsg = (m: string, ms = 3500) => {
     setMsg(m);
     later(() => setMsg(''), ms);
+  };
+  /** Filet de sécurité handlers : une exception dans un onPress ne doit
+   *  JAMAIS tuer l'application (les ErrorBoundary ne couvrent que le rendu).
+   *  L'erreur s'affiche dans le LCD et est consignée en console. */
+  const safe = (fn: () => void) => () => {
+    try {
+      fn();
+    } catch (e) {
+      const m = (e as Error)?.message ?? String(e);
+      console.warn('[Raquette] erreur handler:', m);
+      try {
+        setMsg(`ERR ${m}`.slice(0, 32));
+        later(() => setMsg(''), 6000);
+      } catch (_) {}
+    }
   };
   const feedback = () => {
     if (useSettingsStore.getState().keySounds) {
@@ -287,7 +304,7 @@ export function VirtualHandbox() {
 
   /* ---------- Arbre de menus (panneau « AutoStar Menu » d'ASU) ---------- */
   const lastTreeLeaf = useRef({id: '', at: 0});
-  const treeSelect = (path: number[]) => {
+  const treeSelect = (path: number[]) => safe(() => {
     const node = nodeAt(root, path);
     armOverlay();
     setInput('');
@@ -309,7 +326,7 @@ export function VirtualHandbox() {
         showMsg(`${node.line1.slice(0, 13)} — ${t.hb.treeGotoHint}`, 3500);
       }
     }
-  };
+  })();
 
   /* ---------- Voix (Speech Enable — panneau ASU) ---------- */
   const toggleSpeech = (v: boolean) => {
@@ -494,8 +511,8 @@ export function VirtualHandbox() {
   /* ---------- Composants de touches ---------- */
   const CmdKey = ({label, onPress, onLongPress}: {label: string; onPress: () => void; onLongPress?: () => void}) => (
     <Pressable
-      onPress={() => {feedback(); onPress();}}
-      onLongPress={onLongPress}
+      onPress={safe(() => {feedback(); onPress();})}
+      onLongPress={onLongPress ? safe(onLongPress) : undefined}
       delayLongPress={600}
       style={({pressed}) => ({
         flex: 1, height: 46, borderRadius: 10, justifyContent: 'center', alignItems: 'center',
@@ -507,8 +524,8 @@ export function VirtualHandbox() {
 
   const ArrowKey = ({d, label, size = 56, lit = false}: {d: Dir; label: string; size?: number; lit?: boolean}) => (
     <Pressable
-      onPressIn={() => dirStart(d)}
-      onPressOut={() => dirStop(d)}
+      onPressIn={safe(() => dirStart(d))}
+      onPressOut={safe(() => dirStop(d))}
       style={({pressed}) => ({
         width: size, height: size, borderRadius: size / 2, justifyContent: 'center', alignItems: 'center',
         backgroundColor: pressed || lit ? c.btnActive : c.btnBg,
@@ -524,7 +541,7 @@ export function VirtualHandbox() {
 
   const NumKey = ({digit, sub}: {digit: number; sub?: string}) => (
     <Pressable
-      onPress={() => {feedback(); typeDigit(digit);}}
+      onPress={safe(() => {feedback(); typeDigit(digit);})}
       style={({pressed}) => ({
         flex: 1, height: 48, borderRadius: 12, justifyContent: 'center', alignItems: 'center',
         backgroundColor: pressed ? c.btnActive : c.btnBg, borderWidth: 1, borderColor: c.border, margin: 3,
@@ -564,12 +581,12 @@ export function VirtualHandbox() {
   /** Touches FOCUS : maintien = moteur, relâcher = stop (:F± / :FQ). */
   const HoldKey = ({label, inward}: {label: string; inward: boolean}) => (
     <Pressable
-      onPressIn={() => {
+      onPressIn={safe(() => {
         feedback();
         if (!connected) {showMsg(t.errors.notConnected, 1500); return;}
         autostar.focusStart(inward).catch(() => undefined);
-      }}
-      onPressOut={() => {if (connected) autostar.focusStop().catch(() => undefined);}}
+      })}
+      onPressOut={safe(() => {if (connected) autostar.focusStop().catch(() => undefined);})}
       style={({pressed}) => ({
         flex: 1, height: 46, borderRadius: 10, justifyContent: 'center', alignItems: 'center',
         backgroundColor: pressed ? c.btnActive : c.btnBg, borderWidth: 1, borderColor: pressed ? c.amber : c.border, marginHorizontal: 3,
@@ -606,7 +623,7 @@ export function VirtualHandbox() {
   /** ■ STOP : coupe tout mouvement (:Q#) — visible uniquement en mouvement. */
   const StopPill = () => (
     <Pressable
-      onPress={() => {feedback(); autostar.stopAll().catch(() => undefined); showMsg(t.common.stop, 1200);}}
+      onPress={safe(() => {feedback(); autostar.stopAll().catch(() => undefined); showMsg(t.common.stop, 1200);})}
       style={({pressed}) => pillBox(pressed ? c.btnActive : 'rgba(255,93,93,0.12)', 'rgba(255,93,93,0.55)')}>
       <Text style={{color: c.red, fontSize: 10, fontWeight: '800', letterSpacing: 0.5}}>■ {t.common.stop}</Text>
     </Pressable>
@@ -622,8 +639,8 @@ export function VirtualHandbox() {
     if (hbSync === 'live') {
       return (
         <Pressable
-          onPress={() => {feedback(); handboxSync.disable(); showMsg(t.hb.sync.stopped, 2200);}}
-          onLongPress={() => {feedback(); handboxSync.restart(); showMsg(t.hb.sync.restarted, 2200);}}
+          onPress={safe(() => {feedback(); handboxSync.disable(); showMsg(t.hb.sync.stopped, 2200);})}
+          onLongPress={safe(() => {feedback(); handboxSync.restart(); showMsg(t.hb.sync.restarted, 2200);})}
           delayLongPress={600}
           style={({pressed}) => pillBox(pressed ? c.btnActive : 'rgba(63,214,140,0.12)', pressed ? c.amber : 'rgba(63,214,140,0.55)')}>
           <Text style={{color: c.green, fontSize: 10, fontWeight: '800', letterSpacing: 0.5}}>
@@ -634,7 +651,7 @@ export function VirtualHandbox() {
     }
     return (
       <Pressable
-        onPress={() => {feedback(); if (!handboxSync.enable()) showMsg(t.errors.notConnected, 2000);}}
+        onPress={safe(() => {feedback(); if (!handboxSync.enable()) showMsg(t.errors.notConnected, 2000);})}
         style={({pressed}) => pillBox(pressed ? c.btnActive : c.btnBg, c.border)}>
         <Text style={{color: c.textDim, fontSize: 10, fontWeight: '700', letterSpacing: 0.5}}>{t.hb.sync.off}</Text>
       </Pressable>
@@ -646,7 +663,7 @@ export function VirtualHandbox() {
    *  la synchro reste LIVE et se rétablit aussi toute seule. */
   const RetryPill = () => (
     <Pressable
-      onPress={() => {feedback(); handboxSync.restart(); showMsg(t.hb.sync.restarted, 2200);}}
+      onPress={safe(() => {feedback(); handboxSync.restart(); showMsg(t.hb.sync.restarted, 2200);})}
       style={({pressed}) => pillBox(pressed ? c.btnActive : 'rgba(255,93,93,0.12)', 'rgba(255,93,93,0.55)')}>
       <Text style={{color: c.red, fontSize: 10, fontWeight: '800', letterSpacing: 0.5}}>
         ⟳ {t.hb.sync.retry}
@@ -674,7 +691,7 @@ export function VirtualHandbox() {
       <LcdPanel line1={line1} line2={line2} />
       <View style={{flexDirection: 'row', alignItems: 'center', marginTop: 6, paddingHorizontal: 2}}>
         <Pressable
-          onPress={() => setPosView((v) => (v === 'radec' ? 'altaz' : 'radec'))}
+          onPress={safe(() => setPosView((v) => (v === 'radec' ? 'altaz' : 'radec')))}
           style={{flex: 1}}>
           <Text style={{color: c.textDim, fontSize: 11, fontFamily: 'monospace'}} numberOfLines={1}>
             {statusText}
@@ -712,7 +729,7 @@ export function VirtualHandbox() {
 
       {/* ——— Panneau ASU : AutoStar Menu (arbre cliquable) ——— */}
       <Pressable
-        onPress={() => {feedback(); setTreeOpen(!treeOpen);}}
+        onPress={safe(() => {feedback(); setTreeOpen(!treeOpen);})}
         style={({pressed}) => ({
           flexDirection: 'row', alignItems: 'center', marginTop: 12,
           paddingVertical: 9, paddingHorizontal: 10,
@@ -747,7 +764,7 @@ export function VirtualHandbox() {
           {key: 'slew', label: t.slew.slew},
         ]}
         value={speed}
-        onChange={applySpeed}
+        onChange={(v) => safe(() => applySpeed(v))()}
       />
 
       {/* ——— Panneau ASU : Focus In/Out (maintien) + Focus Speed ——— */}
@@ -766,17 +783,17 @@ export function VirtualHandbox() {
             {key: 'fast', label: t.hb.fsFast},
           ]}
           value={focusSpeed}
-          onChange={(v) => {
+          onChange={(v) => safe(() => {
             feedback();
             setFocusSpeed(v);
             if (connected) autostar.setFocusSpeed(v).catch(() => undefined);
-          }}
+          })()}
         />
       </View>
 
       {/* ——— Panneau ASU : Speech Enable (le LCD est énoncé) ——— */}
       <View style={{marginTop: 10}}>
-        <Toggle value={speech} onChange={toggleSpeech} label={t.hb.speech} />
+        <Toggle value={speech} onChange={(v) => safe(() => toggleSpeech(v))()} label={t.hb.speech} />
       </View>
 
       {/* Clavier — rangées issues du mappage du firmware détecté */}

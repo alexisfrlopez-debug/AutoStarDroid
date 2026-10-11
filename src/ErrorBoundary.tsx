@@ -3,6 +3,8 @@ import {View, Text, ScrollView, TouchableOpacity} from 'react-native';
 
 interface Props {
   children: React.ReactNode;
+  /** Nom de la zone (onglet/écran) affiché dans la carte d'erreur. */
+  zone?: string;
 }
 
 interface State {
@@ -13,6 +15,9 @@ interface State {
  * Filet de sécurité : en release, une erreur de rendu fait planter l'app
  * sans explication. Ici on affiche l'erreur à l'écran + un bouton Relancer.
  * (Les erreurs fatales sont aussi capturées côté natif par CrashReporter.)
+ *
+ * Instancié PAR ÉCRAN (onglets + écrans empilés) : une erreur dans un écran
+ * n'efface plus toute l'application et la carte d'erreur indique la zone.
  */
 export class ErrorBoundary extends React.Component<Props, State> {
   state: State = {error: null};
@@ -46,6 +51,11 @@ export class ErrorBoundary extends React.Component<Props, State> {
           <Text style={{color: '#FFB74D', fontSize: 18, fontWeight: '700', marginBottom: 6}}>
             Une erreur est survenue
           </Text>
+          {this.props.zone ? (
+            <Text style={{color: '#7E8596', fontSize: 11, marginBottom: 4}}>
+              Zone : {this.props.zone}
+            </Text>
+          ) : null}
           <Text style={{color: '#9AA0B0', fontSize: 12, marginBottom: 14}}>
             An error occurred — vous pouvez relancer l&apos;application.
           </Text>
