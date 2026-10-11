@@ -63,10 +63,22 @@ class SensorsModule(reactContext: ReactApplicationContext) :
       val az = (Math.toDegrees(ori[0].toDouble()) + 360.0) % 360.0
       val pitch = Math.toDegrees(ori[1].toDouble())
       val roll = Math.toDegrees(ori[2].toDouble())
+      // Quaternion brut du rotation vector (v1.9.0) : [x·sin(θ/2), y·sin(θ/2),
+      // z·sin(θ/2), cos(θ/2)]. v_monde = R(q)·v_téléphone (cf. quatToMat JS).
+      // Sans 4ᵉ composante (vieux capteurs) : cos(θ/2) = √(1 − ‖v‖²).
+      val v = event.values
+      val vx = v[0].toDouble(); val vy = v[1].toDouble(); val vz = v[2].toDouble()
+      val sinHalf2 = vx * vx + vy * vy + vz * vz
+      val qw = if (v.size >= 4) v[3].toDouble()
+               else Math.sqrt(Math.max(0.0, 1.0 - sinHalf2))
       sendEvent("sensorsOrientation", Arguments.createMap().apply {
         putDouble("azimuthDeg", az)
         putDouble("pitchDeg", pitch)
         putDouble("rollDeg", roll)
+        putDouble("qw", qw)
+        putDouble("qx", vx)
+        putDouble("qy", vy)
+        putDouble("qz", vz)
         putDouble("accuracy", event.accuracy.toDouble())
         putDouble("ts", now.toDouble())
       })

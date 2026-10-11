@@ -1,4 +1,5 @@
-/** Écran Alignement : modes + parcours guidé une/deux étoiles avec SYNC. */
+/** Écran Alignement : modes + parcours guidé une/deux étoiles avec SYNC,
+ *  et recalage précis par télémétrie du téléphone (v1.9.0). */
 import {useMemo, useState} from 'react';
 import {ScrollView, Text, TouchableOpacity, Alert} from 'react-native';
 import {useT} from '../i18n';
@@ -9,6 +10,7 @@ import {withAlt, DisplayObject} from '../services/catalog';
 import {BRIGHT_STARS} from '../services/catalog/stars';
 import {Btn, Card, Segmented, Title, usePal} from '../components/ui';
 import {StatusHeader} from '../components/StatusHeader';
+import {TelemetryAlign} from '../components/TelemetryAlign';
 
 type FlowStep = 'idle' | 'goto1' | 'center1' | 'sync1' | 'goto2' | 'center2' | 'sync2';
 
@@ -167,6 +169,9 @@ export function AlignScreen() {
             style={{marginTop: 10}} />
         </Card>
       ) : null}
+
+      {/* Recalage précis par télémétrie du téléphone (gyroscope + boussole). */}
+      <TelemetryAlign />
     </ScrollView>
   );
 }

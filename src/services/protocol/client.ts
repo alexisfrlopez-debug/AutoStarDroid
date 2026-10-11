@@ -549,6 +549,32 @@ export class AutostarClient {
     await this.cmdSilent(':CM#');
   }
 
+  /**
+   * SYNC sur des coordonnées données (v1.9.0, recalage télémétrie) :
+   * :Sr/:Sd posent la cible puis :CM# déclare la position physique courante
+   * = ces coordonnées. Met à jour l'alignement INTERNE de l'Autostar sans
+   * GOTO. Renvoie false si la raquette refuse :Sr ou :Sd.
+   */
+  async syncRaDec(raDeg: number, decDeg: number): Promise<boolean> {
+    this.bump();
+    const raFormats = [proto.raCmd(raDeg), proto.raCmdLow(raDeg)];
+    const decFormats = [proto.decCmdHigh(decDeg), proto.decCmd(decDeg)];
+    let r1 = '0';
+    for (const f of raFormats) {
+      r1 = await this.cmd(`:Sr${f}#`, 2500, VALID.bit).catch(() => '0');
+      if (r1 === '1') break;
+    }
+    if (r1 !== '1') return false;
+    let r2 = '0';
+    for (const f of decFormats) {
+      r2 = await this.cmd(`:Sd${f}#`, 2500, VALID.bit).catch(() => '0');
+      if (r2 === '1') break;
+    }
+    if (r2 !== '1') return false;
+    await this.cmdSilent(':CM#');
+    return true;
+  }
+
   /** Lecture date/heure/site de la raquette (commande utilisateur). */
   async readScopeData(): Promise<{
     time: string; date: string; tz: string; latDeg: number | null; lonDeg: number | null;
