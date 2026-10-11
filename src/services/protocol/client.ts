@@ -1012,6 +1012,14 @@ export class AutostarClient {
     return true;
   }
 
+  /**
+   * Lecture alt/az PONCTUELLE (:Ga#/:Gz#) pour les diagnostics — indépendante
+   * du polling. Renvoie null si la raquette ne répond pas à ces commandes.
+   */
+  readAltAz(): Promise<{altDeg: number; azDeg: number} | null> {
+    return this.pollAltAz();
+  }
+
   private async pollAltAz(): Promise<{altDeg: number; azDeg: number} | null> {
     const [alt, az] = await Promise.all([
       this.cmd(':Ga#', 2500, VALID.dec).catch(() => ''),

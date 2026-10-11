@@ -30,7 +30,12 @@ import {
 } from '../astro/motorcal';
 import type {PulseDir} from '../astro/tracking';
 
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+let sleep: (ms: number) => Promise<void> = (ms) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** Injection pour les tests (temps virtuel) — ne pas utiliser en production. */
+export function setCalibSleepForTests(fn: (ms: number) => Promise<void>) {
+  sleep = fn;
+}
 
 const R2D = 180 / Math.PI;
 
@@ -192,8 +197,12 @@ export async function measureBacklash(
     onPhase('reverse');
     await autostar.startMove(reverse);
     const tRev = Date.now();
-    const sec = backlashSeconds(gyroCollector.samples, tRev, 10000, bias, 0.03);
+    // FIX v2.1.0 : COLLECTER d'abord (les événements gyro sont asynchrones —
+    // évaluer le tampon immédiatement après startMove le trouvait toujours
+    // vide → backlash « non détecté » en permanence sur matériel réel),
+    // puis analyser la fenêtre complète.
     await sleep(Math.max(0, 10500 - (Date.now() - tRev)));
+    const sec = backlashSeconds(gyroCollector.samples, tRev, 10000, bias, 0.03);
     await autostar.stopMove(reverse);
     onPhase('settle');
     await sleep(800);

@@ -13,6 +13,7 @@ import {StatusHeader} from '../components/StatusHeader';
 import {TelemetryAlign} from '../components/TelemetryAlign';
 import {TelemetryTracking} from '../components/TelemetryTracking';
 import {MotorCalib} from '../components/MotorCalib';
+import {Diagnostics} from '../components/Diagnostics';
 
 type FlowStep = 'idle' | 'goto1' | 'center1' | 'sync1' | 'goto2' | 'center2' | 'sync2';
 
@@ -183,6 +184,9 @@ export function AlignScreen() {
 
       {/* Auto-calibrage des moteurs par gyroscope (v2.0.0). */}
       <MotorCalib />
+
+      {/* Suite de diagnostic autonome complète (v2.1.0). */}
+      <Diagnostics />
     </ScrollView>
   );
 }
