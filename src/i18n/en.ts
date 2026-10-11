@@ -118,6 +118,7 @@ export const en = {
       na: 'SYNC —', off: 'SYNC OFF', live: 'LIVE', retry: 'RESTART',
       stopped: 'Real-time sync stopped', restarted: 'Real-time sync restarted',
       phys: 'PHYSICAL',
+      lcdMirror: 'LCD MIRROR',
       waitPos: 'Waiting for pos…',
       lcdMute: 'Position silent',
       lcdInit: 'Not initialised',

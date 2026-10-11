@@ -1,27 +1,28 @@
 /**
  * handboxSync — synchronisation temps réel entre la raquette virtuelle et la
- * raquette physique.
+ * raquette physique (Hand Control Panel, comportement du Remote Handbox
+ * d'AutostarSuite).
  *
  * Quand la synchro est ACTIVE (« live », défaut dès la connexion) :
- *  - la position AD/DEC est relue en continu (500 ms) et le LCD de la
- *    raquette virtuelle affiche en permanence la même information que
- *    l'écran d'observation de la raquette physique ;
- *  - l'altitude/azimut est lue toutes les 2 s (:Ga/:Gz) ;
- *  - le mouvement de la raquette (slew physique ou suivi) est détecté et
- *    signalé (croix allumée + pastille ● PHYSIQUE).
+ *  - MIROIR LCD (v1.8.1) : l'écran 2×16 LITTÉRAL de la raquette physique est
+ *    relu en continu par :ED# (2 Hz) et affiché tel quel — le protocole Meade
+ *    le PERMET (extension raquette Autostar, prouvée matériellement par le
+ *    log astropad du repo LX200emulator : une Autostar réelle répond
+ *    0x97 + « Select Item:      Object         » + '#') ;
+ *  - les touches VIRTUELLES simulent les touches PHYSIQUES (:EK<ascii>#) :
+ *    la raquette réagit comme si on avait appuyé sur elle, et son écran
+ *    (relu par :ED#) se répercute ici — miroir bidirectionnel ;
+ *  - la position AD/DEC reste relue (1 tick sur 2) pour le reste de l'app,
+ *    alt/az toutes les 2 s (:Ga/:Gz) ;
+ *  - le mouvement de la raquette (slew physique) est détecté et signalé
+ *    (croix allumée + pastille ● PHYSIQUE).
  *
- * FIABILITÉ (v1.5.0) : la synchro NE TOMBE PLUS EN ERREUR quand la position
- * ne vient pas. Tant qu'aucune position n'arrive, le LCD affiche
- * « SYNCHRO LIVE / Attente position… » et le diagnostic (hbHint) explique
- * quoi vérifier ; la moindre position valide rétablit le miroir
- * instantanément — sans appui sur RELANCER, qui reste disponible :
+ * REPLI : si la raquette ne connaît pas :ED# (LX200 classique), l'écran
+ * télémétrie (AD/DEC, alt/az) reprend la main — aucun blocage.
+ *
+ * Synchro contrôlable (demande v1.5.0) :
  *  - appui court sur la pastille LIVE : DÉSACTIVER la synchro ;
  *  - appui long sur la pastille LIVE : RELANCER (flush + reprise).
- *
- * Note matériel : le protocole série Meade (#49x/LX200) ne permet pas de
- * lire le contenu littéral du LCD de la raquette physique ni ses touches —
- * la synchro reconstruit fidèlement son écran d'observation (RA/DEC, alt/az,
- * mouvements) à partir des télémétries du protocole, en temps réel.
  */
 import {autostar} from './client';
 import {useScopeStore} from '../../store/scopeStore';
@@ -82,5 +83,6 @@ export const handboxSync = {
     s.setHbSlewFast(false);
     s.setHasPos(false);
     s.setAltAz(null, null);
+    s.clearLcdMirror();
   },
 };

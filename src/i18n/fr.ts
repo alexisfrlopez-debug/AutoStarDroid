@@ -120,6 +120,7 @@ export const fr: Dict = {
       na: 'SYNCHRO —', off: 'SYNCHRO OFF', live: 'LIVE', retry: 'RELANCER',
       stopped: 'Synchro temps réel arrêtée', restarted: 'Synchro temps réel relancée',
       phys: 'PHYSIQUE',
+      lcdMirror: 'MIROIR LCD',
       waitPos: 'Attente position…',
       lcdMute: 'Position muette',
       lcdInit: 'Non initialisée',

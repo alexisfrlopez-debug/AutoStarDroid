@@ -47,6 +47,3 @@ export const night = {
 export type Palette = typeof C;
 
 export const theme = (nightVision: boolean): Palette => (nightVision ? night : C);
-
-export const spacing = {xs: 4, s: 8, m: 12, l: 16, xl: 24, xxl: 32};
-export const radius = {s: 8, m: 12, l: 18, round: 999};

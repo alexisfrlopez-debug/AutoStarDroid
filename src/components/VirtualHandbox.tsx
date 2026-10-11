@@ -45,7 +45,7 @@ import {useEffect, useMemo, useRef, useState} from 'react';
 import {Pressable, Text, View, Vibration} from 'react-native';
 import {useT} from '../i18n';
 import {useSettingsStore} from '../store/settingsStore';
-import {autostar, type Dir} from '../services/protocol/client';
+import {autostar, type Dir, HB_KEYS, hbDigitKey, LCD_STALE_MS} from '../services/protocol/client';
 import {handboxSync} from '../services/protocol/handboxSync';
 import {tts} from '../services/phone/tts';
 import {useScopeStore, type HbHint} from '../store/scopeStore';
@@ -103,6 +103,9 @@ export function VirtualHandbox() {
   const fwModel = useScopeStore((s) => s.fwModel);
   const fwProduct = useScopeStore((s) => s.fwProduct);
   const fwVersion = useScopeStore((s) => s.fwVersion);
+  const lcdLine1 = useScopeStore((s) => s.lcdLine1);
+  const lcdLine2 = useScopeStore((s) => s.lcdLine2);
+  const lcdAt = useScopeStore((s) => s.lcdAt);
 
   /** Modèle actif : firmware détecté en priorité, modèle réglé en secours. */
   const model = fwModel ?? settingsModel;
@@ -124,18 +127,27 @@ export function VirtualHandbox() {
   const [overlay, setOverlay] = useState(false);
   const overlayTimer = useRef<number | null>(null);
   const timers = useRef<number[]>([]);
+  /** Garde de vie : les promesses (GOTO, pushPhoneData…) peuvent se résoudre
+   *  APRÈS le démontage de l'écran — leurs callbacks doivent alors être des
+   *  no-ops (sinon setState sur unmount : warning React / crash de suites de
+   *  tests qui se suivent). */
+  const alive = useRef(true);
   useEffect(() => () => {
+    alive.current = false;
     timers.current.forEach((id) => clearTimeout(id));
     if (overlayTimer.current !== null) clearTimeout(overlayTimer.current);
   }, []);
   const later = (fn: () => void, ms: number) => {
-    timers.current.push(setTimeout(fn, ms) as unknown as number);
+    timers.current.push(
+      setTimeout(() => {if (alive.current) fn();}, ms) as unknown as number,
+    );
   };
   const armOverlay = () => {
+    if (!alive.current) return;
     setOverlay(true);
     if (overlayTimer.current !== null) clearTimeout(overlayTimer.current);
     overlayTimer.current = setTimeout(
-      () => setOverlay(false), MIRROR_RETURN_MS,
+      () => {if (alive.current) setOverlay(false);}, MIRROR_RETURN_MS,
     ) as unknown as number;
   };
   /** La raquette physique bouge → l'écran miroir reprend la main aussitôt. */
@@ -146,11 +158,21 @@ export function VirtualHandbox() {
       if (overlayTimer.current !== null) {clearTimeout(overlayTimer.current); overlayTimer.current = null;}
     }
   }, [hbExternal]);
+  /** Horloge de rendu : le miroir LCD (:ED#) devient « périmé » après
+   *  LCD_STALE_MS sans nouveau dump — un tick d'une seconde force le
+   *  re-rendu pour que l'écran retombe sur la télémétrie à temps. */
+  const [, forceTick] = useState(0);
+  useEffect(() => {
+    if (!(connStatus === 'connected' && hbSync === 'live')) return;
+    const id = setInterval(() => {if (alive.current) forceTick((n) => n + 1);}, 1000);
+    return () => clearInterval(id);
+  }, [connStatus, hbSync]);
   /** Synchro (re)lancée → écran miroir immédiat. */
   useEffect(() => {
     if (hbSync === 'live') {setMsg(''); setOverlay(false);}
   }, [hbSync]);
   const showMsg = (m: string, ms = 3500) => {
+    if (!alive.current) return; // promesse résolue après démontage : no-op
     setMsg(m);
     later(() => setMsg(''), ms);
   };
@@ -258,7 +280,21 @@ export function VirtualHandbox() {
   const siblings = cursor.length ? (parent.children ?? []) : (root.children ?? []);
 
   /* ---------- Navigation ---------- */
+  /** Mode miroir des touches (Hand Control Panel) : le LCD :ED# de la
+   *  raquette physique est relu en continu → les touches VIRTUELLES simulent
+   *  les touches PHYSIQUES (:EK<ascii>#). La raquette réagit exactement
+   *  comme si on appuyait sur elle (menus, GO TO, flèches) et son écran se
+   *  répercute ici : les deux raquettes affichent et agissent à l'identique.
+   *  Hors miroir (synchro off, raquette sans :ED#) : menus locaux + commandes
+   *  protocole directes, comme avant v1.8.1. */
+  const lcdFresh = connected && hbSync === 'live' && lcdLine1 !== null &&
+    lcdLine2 !== null && lcdAt > 0 && Date.now() - lcdAt < LCD_STALE_MS;
+  const keyMirror = lcdFresh;
+  const ek = (code: number) => {
+    autostar.keyPress(code).catch(() => undefined);
+  };
   const enter = () => {
+    if (keyMirror) {feedback(); ek(HB_KEYS.enter); return;}
     armOverlay();
     if (input) {jumpToInput(false); return;}
     if (!cursor.length) {setCursor([0]); return;}
@@ -266,6 +302,7 @@ export function VirtualHandbox() {
     selected.onEnter?.();
   };
   const mode = () => {
+    if (keyMirror) {feedback(); ek(HB_KEYS.mode); return;}
     // Comportement « Hand Control » (AutostarSuite) : sur l'écran
     // d'observation miroir, MODE change d'écran d'information (AD/DEC ↔
     // Alt/Az) — comme les touches d'affichage du #497 ; dans les menus
@@ -279,8 +316,12 @@ export function VirtualHandbox() {
     setMsg('');
     setCursor(cursor.slice(0, -1));
   };
-  const modeRoot = () => {armOverlay(); setInput(''); setMsg(''); setCursor([]);};
+  const modeRoot = () => {
+    if (keyMirror) {feedback(); ek(HB_KEYS.mode); return;}
+    armOverlay(); setInput(''); setMsg(''); setCursor([]);
+  };
   const scroll = (delta: number) => {
+    if (keyMirror) {feedback(); ek(delta < 0 ? HB_KEYS.up : HB_KEYS.down); return;}
     armOverlay();
     setInput('');
     if (!cursor.length) {
@@ -294,6 +335,7 @@ export function VirtualHandbox() {
     setCursor([...cursor.slice(0, -1), idx]);
   };
   const gotoKey = () => {
+    if (keyMirror) {feedback(); ek(HB_KEYS.goto); return;}
     armOverlay();
     if (input) {jumpToInput(true); return;}
     if (cursor.length) {
@@ -379,6 +421,10 @@ export function VirtualHandbox() {
   };
 
   const typeDigit = (d: number) => {
+    // Miroir : le chiffre tape SUR la raquette physique (saisie de son menu
+    // courant, sélection Messier/NGC/étoile…) — comme le pavé numérique du
+    // panel ASU (:EK48+d#).
+    if (keyMirror) {feedback(); ek(hbDigitKey(d)); return;}
     const numbered = !cursor.length ? false : (parent.numbered ?? false);
     if (!numbered) {nonDigitAction(d); return;}
     armOverlay();
@@ -423,6 +469,7 @@ export function VirtualHandbox() {
   };
 
   const help = () => {
+    if (keyMirror) {feedback(); ek(HB_KEYS.help); return;}
     const h = selected.help ?? t.hb.helpGeneric;
     setMsg(h.slice(0, 32));
     later(() => setMsg(''), 5000);
@@ -433,11 +480,19 @@ export function VirtualHandbox() {
   const dirStart = (d: Dir) => {
     feedback();
     if (!connected) {showMsg(t.errors.notConnected, 1500); return;}
+    // Miroir : appui flèche = appui de la touche PHYSIQUE correspondante
+    // (:EK# pulse — la raquette slew comme pour un appui bref). Codes
+    // vérifiés dans le log ScopeBoss réel : N=85, S=68, W=87, E=69.
+    if (keyMirror) {
+      ek(d === 'n' ? HB_KEYS.up : d === 's' ? HB_KEYS.down : d === 'w' ? HB_KEYS.west : HB_KEYS.east);
+      return;
+    }
     activeDirs.current.add(d);
     autostar.setVirtualHold(d, true); // maintien virtuel ≠ mouvement physique
     autostar.startMove(d).catch(() => undefined);
   };
   const dirStop = (d: Dir) => {
+    if (keyMirror) return; // pulse :EK# déjà terminé côté raquette physique
     if (!activeDirs.current.has(d)) return;
     activeDirs.current.delete(d);
     if (connected) {
@@ -461,6 +516,12 @@ export function VirtualHandbox() {
   if (msg) {
     line1 = msg.slice(0, 16);
     line2 = msg.slice(16, 32);
+  } else if (mirrorActive && lcdFresh) {
+    // MIROIR LCD LITTÉRAL (v1.8.1) : l'écran EXACT de la raquette physique
+    // (dump :ED# frais, 2 lignes de 16) — le Hand Control Panel affiche ce
+    // que le matériel affiche, au caractère près, y compris ses menus.
+    line1 = lcdLine1 as string;
+    line2 = lcdLine2 as string;
   } else if (mirrorActive && !hasPos) {
     // Synchro live sans AD/DEC utilisable. REPLI ALT/AZ (v1.8.0) : si
     // l'horizontale est lue en continu (raquette muette en AD/DEC mais
@@ -730,6 +791,13 @@ export function VirtualHandbox() {
           <View style={pillBox('rgba(255,170,60,0.14)', 'rgba(255,170,60,0.6)')}>
             <Text style={{color: c.amber, fontSize: 10, fontWeight: '800', letterSpacing: 0.5}}>
               ● {t.hb.sync.phys}
+            </Text>
+          </View>
+        ) : null}
+        {lcdFresh ? (
+          <View style={pillBox('rgba(63,214,140,0.12)', 'rgba(63,214,140,0.55)')}>
+            <Text style={{color: c.green, fontSize: 10, fontWeight: '800', letterSpacing: 0.5}}>
+              ▤ {t.hb.sync.lcdMirror}
             </Text>
           </View>
         ) : null}

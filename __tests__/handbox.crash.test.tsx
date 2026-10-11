@@ -32,6 +32,10 @@ let tree: any;
 const uncaught: string[] = [];
 
 async function mount() {
+  // un test peut remonter plusieurs fois (pass 1/2/3) : l'arbre précédent
+  // DOIT être démonté, sinon ses intervalles (miroir LCD 1 Hz) restent actifs
+  // après la fin du fichier et polluent la suite de tests qui suit.
+  if (tree) {tree.unmount(); tree = null;}
   await act(async () => {
     tree = createRTR(<HandboxScreen />, {
       onUncaughtError: (error: any, info: any) => {

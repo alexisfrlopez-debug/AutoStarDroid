@@ -121,6 +121,21 @@ export class DemoScopeBrain {
       return aa.altDeg < 0;
     };
     switch (true) {
+      case c === ':ED': {
+        // MIROIR LCD (v1.8.1) : dump 2×16 comme le matériel Autostar réel
+        // (marqueur \x97 + 32 caractères + '#') — la démo démontre le même
+        // mécanisme que le Remote Handbox d'AutostarSuite.
+        const l = (s: string) => s.replace(/\u00DF/g, '\u00B0').slice(0, 16).padEnd(16, ' ');
+        let l1: string; let l2: string;
+        if (this.gotoUntil !== null) { l1 = 'Slewing...'; l2 = ''; }
+        else { l1 = 'RA ' + this.hms(this.raDeg); l2 = 'DEC ' + this.dms(this.decDeg); }
+        return '\x97' + l(l1) + l(l2) + '#';
+      }
+      case c.startsWith(':EK'):
+        // Simulation de touches (13=ENTER, 9=MODE, 71=GOTO…) : le brain de
+        // démo ne navigue pas de menus — l'écran :ED# reflète déjà l'état
+        // interne (position, Slewing...). Accepté sans réponse.
+        return '';
       case c === ':Gr' || c === ':GR':
         return this.hms(this.raDeg) + '#';
       case c === ':Gd' || c === ':GD':

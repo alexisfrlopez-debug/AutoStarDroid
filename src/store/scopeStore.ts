@@ -53,6 +53,14 @@ interface ScopeState {
    *  > 1°/s) : le LCD de la raquette physique affiche « Slewing... » et le
    *  miroir de la raquette virtuelle l'affiche à l'identique. */
   hbSlewFast: boolean;
+  /** MIROIR LCD (:ED#) — LITTÉRAL de l'écran 2×16 de la raquette physique,
+   *  relu en continu quand la synchro est live. null = jamais lu ou raquette
+   *  sans :ED# (repli sur l'écran de télémétrie). lcdAt = horodatage du
+   *  dernier dump valide (0 si aucun) ; l'écran est considéré frais si
+   *  Date.now() - lcdAt < LCD_STALE_MS (VirtualHandbox). */
+  lcdLine1: string | null;
+  lcdLine2: string | null;
+  lcdAt: number;
   altDeg: number | null; // lu en direct (:Ga) quand la synchro est active
   azDeg: number | null; // lu en direct (:Gz)
   scopeTime: string; // 'HH:MM:SS' lu sur la raquette
@@ -73,6 +81,9 @@ interface ScopeState {
   setHbExternal: (x: boolean) => void;
   setHbDirs: (d: {n: boolean; s: boolean; e: boolean; w: boolean} | null) => void;
   setHbSlewFast: (v: boolean) => void;
+  setLcdMirror: (line1: string, line2: string) => void;
+  /** Marque le miroir LCD indisponible (raquette sans :ED#) : repli télémétrie. */
+  clearLcdMirror: () => void;
   setAltAz: (altDeg: number | null, azDeg: number | null) => void;
   setScopeTime: (t: string) => void;
   setScopeDate: (d: string) => void;
@@ -101,6 +112,9 @@ const initial = {
   hbExternal: false,
   hbDirs: null as ScopeState['hbDirs'],
   hbSlewFast: false,
+  lcdLine1: null as string | null,
+  lcdLine2: null as string | null,
+  lcdAt: 0,
   altDeg: null as number | null,
   azDeg: null as number | null,
   scopeTime: '--:--:--',
@@ -126,6 +140,8 @@ export const useScopeStore = create<ScopeState>((set) => ({
   setHbExternal: (hbExternal) => set({hbExternal}),
   setHbDirs: (hbDirs) => set({hbDirs}),
   setHbSlewFast: (hbSlewFast) => set({hbSlewFast}),
+  setLcdMirror: (lcdLine1, lcdLine2) => set({lcdLine1, lcdLine2, lcdAt: Date.now()}),
+  clearLcdMirror: () => set({lcdLine1: null, lcdLine2: null, lcdAt: 0}),
   setAltAz: (altDeg, azDeg) => set({altDeg, azDeg}),
   setScopeTime: (scopeTime) => set({scopeTime}),
   setScopeDate: (scopeDate) => set({scopeDate}),

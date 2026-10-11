@@ -20,6 +20,52 @@ export type Speed = keyof typeof SPEED_CMDS;
 export interface RaDec {raDeg: number; decDeg: number}
 
 /**
+ * MIROIR LCD (v1.8.1) — le LCD de la raquette VIRTUELLE affiche le LITTÉRAL
+ * de l'écran de la raquette PHYSIQUE, relu en continu par :ED# (extension
+ * raquette Autostar : réponse = marqueur 0x80–0xDF + 32 caractères (2×16)
+ * + '#'). C'est le mécanisme exact du Remote Handbox d'AutostarSuite et de
+ * ScopeBoss (prouvé matériellement : log astropad du repo LX200emulator —
+ * une Autostar réelle répond \x97 + « Select Item:      Object         »).
+ * Le glyphe 0xDF est le « ° » du LCD matériel ; les marqueurs varient
+ * (0x97 menus, 0x9F boot/vitesses, 0xD0/0xD1 saisie numérique…).
+ */
+export const LCD_STALE_MS = 2500;
+
+/** Découpe une réponse :ED# en 2 lignes de 16 ; renvoie null si hors format. */
+export function parseLcdReply(reply: string): {line1: string; line2: string} | null {
+  if (reply.length < 32) return null;
+  const body = reply.slice(reply.length - 32); // tolère 1+ marqueurs en tête
+  const deDegree = (s: string) => s.replace(/\u00DF/g, '\u00B0');
+  return {
+    line1: deDegree(body.slice(0, 16)),
+    line2: deDegree(body.slice(16, 32)),
+  };
+}
+
+/**
+ * Codes ASCII des touches physiques pour :EK<ascii># (simulation d'appuis
+ * SUR la raquette physique). Sources : header de lx200emulator.py et log
+ * astropad (ScopeBoss réel) : Mode=9, Enter=13, flèche haut/N=85, bas/S=68,
+ * gauche/W=87, droite/E=69, GO TO=71, chiffres=48–57 (l'émulateur v2 ajoute
+ * 63='?'). Sur #49x en mode menu, flèches et touches de défilement ont le
+ * même effet → les touches de défilement VIRTUELLES réutilisent 85/68.
+ */
+export const HB_KEYS = {
+  mode: 9,
+  enter: 13,
+  goto: 71,
+  help: 63,
+  up: 85,    // flèche haut (Nord)
+  down: 68,  // flèche bas (Sud)
+  west: 87,  // flèche gauche (Ouest)
+  east: 69,  // flèche droite (Est)
+  digit0: 48, // 0–9 = 48 + n
+} as const;
+
+/** Code :EK# d'une touche chiffre. */
+export const hbDigitKey = (d: number): number => HB_KEYS.digit0 + d;
+
+/**
  * Devine la génération de raquette d'après la réponse :GVP#/:GVN#.
  * Renvoie null si rien ne permet de trancher (l'app garde alors le modèle
  * choisi dans Réglages). Ordre des tests : du plus spécifique au plus large.
@@ -105,6 +151,9 @@ export class AutostarClient {
   private lastAltAzAt = 0;
   private lastProbeAt = 0; // dernier diagnostic :GVP# (mode muet)
   private muteLogged = false; // message « muette » déjà journalisé ?
+  /** Compteur d'échecs :ED# (repli télémétrie après 6) + flag 1er succès. */
+  private lcdFail = 0;
+  private lcdLogged = false;
   /** Fenêtre pendant laquelle un mouvement est attribué à L'APP (commandes
    *  :Mn…/:MS# qu'elle vient d'envoyer) — hors fenêtre, le mouvement constaté
    *  vient de la raquette physique. */
@@ -246,6 +295,8 @@ export class AutostarClient {
     this.lastProbeAt = 0;
     this.muteLogged = false;
     this.failCount = 0;
+    this.lcdFail = 0;
+    this.lcdLogged = false;
     handboxSync.reset(); // purge synchro + état physique (mêmes IDs que onClosed)
     const s = useScopeStore.getState();
     s.setConnStatus('disconnected');
@@ -371,6 +422,27 @@ export class AutostarClient {
     return {product, version};
   }
 
+  /**
+   * Lecture du LCD RÉEL de la raquette physique (:ED#, timeout court).
+   * Renvoie null si la raquette ne connaît pas :ED# (LX200 classique) ou
+   * est muette ce cycle — l'appelant garde alors son écran précédent.
+   */
+  async getLcd(): Promise<{line1: string; line2: string} | null> {
+    const reply = await this.cmd(':ED#', 900, /^[\u0080-\u00FF]/).catch(() => '');
+    return parseLcdReply(reply);
+  }
+
+  /**
+   * Simule un appui de touche SUR la raquette physique (:EK<ascii>#).
+   * La raquette réagit exactement comme si la touche avait été pressée
+   * (menus, navigation, GO TO sur son dernier objet) — et son écran,
+   * relu par :ED#, se répercute sur la raquette virtuelle : c'est le
+   * comportement du Hand Control Panel d'AutostarSuite.
+   */
+  async keyPress(code: number): Promise<void> {
+    await this.cmdSilent(`:EK${code}#`);
+  }
+
   async setSpeed(speed: Speed) {
     await this.cmdSilent(SPEED_CMDS[speed]);
   }
@@ -417,17 +489,60 @@ export class AutostarClient {
     this.ownMoveUntil = Date.now() + 1200;
   }
 
-  /** GOTO vers RA/Dec. Renvoie 'ok' ou un message d'erreur localisé. */
+  /** GOTO vers RA/Dec. Renvoie 'ok' ou un message d'erreur localisé.
+   *  ROBUSTESSE (v1.8.1) : le format des coordonnées dépend du mode de
+   *  précision de la raquette (haute "HH:MM:SS"/"sDD*MM:SS", basse
+   *  "HH:MM.T"/"sDD*MM") — un format refusé ("0") est retenté dans
+   *  l'autre précision AVANT de renoncer : un GO TO ne doit jamais échouer
+   *  pour une histoire de format. La fin du slew est suivie par :D#
+   *  (barre "|" pendant le moteur, chaîne vide à l'arrivée — spec Autostar). */
   async gotoRaDec(raDeg: number, decDeg: number): Promise<'ok' | 'belowHorizon' | 'noObject' | 'refused'> {
     this.bump();
-    const r1 = await this.cmd(`:Sr${proto.raCmd(raDeg)}#`, 3000, VALID.bit);
-    const r2 = await this.cmd(`:Sd${proto.decCmd(decDeg)}#`, 3000, VALID.bit);
-    if (r1 !== '1' || r2 !== '1') return 'refused';
-    const ms = await this.cmd(':MS#', 5000, VALID.digit);
+    const raFormats = [proto.raCmd(raDeg), proto.raCmdLow(raDeg)];
+    const decFormats = [proto.decCmdHigh(decDeg), proto.decCmd(decDeg)];
+    let r1 = '0';
+    for (const f of raFormats) {
+      r1 = await this.cmd(`:Sr${f}#`, 2500, VALID.bit).catch(() => '0');
+      if (r1 === '1') break;
+    }
+    if (r1 !== '1') return 'refused';
+    let r2 = '0';
+    for (const f of decFormats) {
+      r2 = await this.cmd(`:Sd${f}#`, 2500, VALID.bit).catch(() => '0');
+      if (r2 === '1') break;
+    }
+    if (r2 !== '1') return 'refused';
+    const ms = await this.cmd(':MS#', 5000, VALID.digit).catch(() => '');
     this.ownMoveUntil = Date.now() + 45000; // GOTO : slew possiblement long
-    if (ms === '0') return 'ok';
-    if (ms === '1') return 'belowHorizon';
-    return 'noObject';
+    if (ms !== '0') {
+      if (ms === '1') return 'belowHorizon';
+      if (ms === '2') return 'noObject';
+      return 'refused'; // muette/NACK — le GO TO peut malgré tout partir
+    }
+    this.watchSlewEnd();
+    return 'ok';
+  }
+
+  /** Suit la fin du GOTO par :D# ("|" pendant le moteur, vide à l'arrivée).
+   *  Boucle tolérante : les raquettes muettes pendant un moteur ne coupent
+   *  pas la surveillance ; la moindre réponse vide ou stabilisation de
+   *  position clôt l'épisode. Fire-and-forget (max 3 min). */
+  private watchSlewEnd(cycles = 0) {
+    if (cycles > 260) return; // ~3 min à 700 ms
+    setTimeout(() => {
+      if (!this.isConnected()) return;
+      this.cmd(':D#', 1500)
+        .then((d) => {
+          if (d === '') {
+            const s = useScopeStore.getState();
+            s.pushLog('info', 'GOTO terminé (monture arrivée)');
+            this.ownMoveUntil = Date.now() + 1200;
+          } else {
+            this.watchSlewEnd(cycles + 1);
+          }
+        })
+        .catch(() => this.watchSlewEnd(cycles + 1)); // muette : on réessaie
+    }, 700);
   }
 
   async syncHere(): Promise<void> {
@@ -537,6 +652,37 @@ export class AutostarClient {
       if (Date.now() < this.priorityUntil) return;
       this.pollBusy = true;
       try {
+        const s0 = useScopeStore.getState();
+        const live = s0.hbSync === 'live';
+        // MIROIR LCD (v1.8.1) : :ED# à chaque tick en synchro live — le
+        // littéral de l'écran de la raquette physique prime sur toute
+        // reconstruction. Repli : si la raquette ne connaît pas :ED#
+        // (6 échecs de suite), l'écran télémétrie reprend la main.
+        if (live) {
+          const lcd = await this.getLcd();
+          if (lcd) {
+            this.lcdFail = 0;
+            this.failCount = 0; // la liaison vit : pas de diagnostic « muette »
+            s0.setLcdMirror(lcd.line1, lcd.line2);
+            if (!this.lcdLogged) {
+              this.lcdLogged = true;
+              s0.pushLog('info', 'Miroir LCD actif (:ED#) — écran de la raquette physique relu en continu');
+            }
+          } else {
+            this.lcdFail += 1;
+            if (this.lcdFail === 6) {
+              s0.clearLcdMirror();
+              s0.pushLog('info', 'Raquette sans :ED# — miroir par télémétrie (position/alt-az)');
+            }
+          }
+          // position 1 tick sur 2 : la ligne série reste dévolue en partie au
+          // miroir LCD (2 Hz, cadence de rafraîchissement du LCD matériel)
+          if (this.pollTick % 2 === 1) {
+            this.pollTick += 1;
+            this.applyHint(s0, Date.now());
+            return;
+          }
+        }
         const {raDeg, decDeg} = await this.readPosition();
         const s = useScopeStore.getState();
         const now = Date.now();
@@ -647,6 +793,12 @@ export class AutostarClient {
    *  EXCEPTION (v1.8.0) : si l'alt/az est lu en continu, la liaison vit et
    *  le miroir est alimenté par l'horizontale — aucun diagnostic d'attente. */
   private applyHint(s: ReturnType<typeof useScopeStore.getState>, now: number) {
+    // miroir LCD frais : la liaison vit et l'écran réel est affiché —
+    // aucun diagnostic (la position AD/DEC absente n'a plus d'importance)
+    if (this.lcdFail === 0 && s.lcdAt > 0 && now - s.lcdAt < LCD_STALE_MS) {
+      s.setHbHint('none');
+      return;
+    }
     if (this.lastAltAzAt && now - this.lastAltAzAt < 4000) {
       s.setHbHint('none');
       return;

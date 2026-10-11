@@ -9,7 +9,7 @@
  * puis le long du tube / de l'axe horaire, bord supérieur pointé vers
  * l'étoile polaire (étapes 2-3), et régler la monture jusqu'à Δ ≈ 0.
  */
-import {useEffect, useMemo, useState} from 'react';
+import {useEffect, useMemo, useRef, useState} from 'react';
 import {Text, View, TouchableOpacity} from 'react-native';
 import {useT} from '../i18n';
 import {useSettingsStore} from '../store/settingsStore';
@@ -38,6 +38,19 @@ export function MiseEnStation() {
   const [pos, setPos] = useState<PhonePos | null>(null);
   const [invertAlt, setInvertAlt] = useState(false);
   const [msg, setMsg] = useState('');
+  /** Nettoyage des timers de message : un setState après unmount est un
+   *  warning React (et casse les suites de tests qui se suivent). */
+  const alive = useRef(true);
+  const msgTimers = useRef<number[]>([]);
+  useEffect(() => () => {
+    alive.current = false;
+    msgTimers.current.forEach((id) => clearTimeout(id));
+  }, []);
+  const laterClear = (ms: number) => {
+    msgTimers.current.push(
+      setTimeout(() => {if (alive.current) setMsg('');}, ms) as unknown as number,
+    );
+  };
 
   useEffect(() => {
     sensorsAvailable().then(setAvail);
@@ -70,13 +83,15 @@ export function MiseEnStation() {
     try {
       setMsg(t.station.gps.sending);
       const p = await getPhonePosition();
+      if (!alive.current) return; // résolu après démontage : no-op
       setPos(p);
       setSite({name: 'GPS', latDeg: p.latDeg, lonDeg: p.lonDeg, elevM: Math.round(p.elevM)});
       setMsg(t.station.gps.sent);
     } catch (e) {
+      if (!alive.current) return;
       setMsg(`${t.station.gps.failed}: ${(e as Error).message}`);
     }
-    setTimeout(() => setMsg(''), 4000);
+    laterClear(4000);
   }
 
   async function pushSite() {
@@ -84,11 +99,13 @@ export function MiseEnStation() {
     try {
       setMsg(t.station.gps.sending);
       await autostar.pushPhoneData(site.latDeg, site.lonDeg);
+      if (!alive.current) return;
       setMsg(t.station.gps.sent);
     } catch (e) {
+      if (!alive.current) return;
       setMsg(`${t.station.gps.failed}: ${(e as Error).message}`);
     }
-    setTimeout(() => setMsg(''), 4000);
+    laterClear(4000);
   }
 
   /* ---------- Rendu ---------- */
