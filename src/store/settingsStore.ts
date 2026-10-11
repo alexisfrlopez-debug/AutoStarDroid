@@ -1,6 +1,7 @@
 import {create} from 'zustand';
 import {createJSONStorage, persist} from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import type {MountPresetId} from '../services/astro/mounts';
 
 export type Lang = 'en' | 'fr';
 export type ScopeModelId = 'autostar2' | 'autostar497' | 'autostar495' | 'autostar494' | 'lx200';
@@ -30,6 +31,15 @@ interface SettingsState {
   /** Mise à jour AUTOMATIQUE de la raquette physique à chaque connexion
    *  (date, heure, fuseau, site depuis les réglages du téléphone). */
   autoSyncScope: boolean;
+  /** Preset de MONTURE (v2.2.0) : 'auto' = déduit de la raquette détectée,
+   *  sinon le choix manuel de l'utilisateur (butées, taux attendus, jeu
+   *  typique — utilisé par le diagnostic et les butées). */
+  mountPreset: MountPresetId | 'auto';
+  /** PRÉCISION TÉLÉMÉTRIQUE (v2.2.0) : quand ACTIVÉ, chaque pointage
+   *  (GOTO app ou raquette) déclenche à l'arrivée un réglage fin automatique
+   *  par la télémétrie du téléphone, puis la validation utilisateur et
+   *  l'enregistrement des nouveaux paramètres. */
+  telemetryPrecision: boolean;
   setLanguage: (l: Lang) => void;
   setNightVision: (v: boolean) => void;
   setKeySounds: (v: boolean) => void;
@@ -42,6 +52,8 @@ interface SettingsState {
   setOnlyAboveHorizon: (v: boolean) => void;
   setDeclinationDeg: (d: number) => void;
   setAutoSyncScope: (v: boolean) => void;
+  setMountPreset: (p: MountPresetId | 'auto') => void;
+  setTelemetryPrecision: (v: boolean) => void;
 }
 
 export const useSettingsStore = create<SettingsState>()(
@@ -59,6 +71,8 @@ export const useSettingsStore = create<SettingsState>()(
       onlyAboveHorizon: true,
       declinationDeg: 0,
       autoSyncScope: true,
+      mountPreset: 'auto',
+      telemetryPrecision: true,
       setLanguage: (language) => set({language}),
       setNightVision: (nightVision) => set({nightVision}),
       setKeySounds: (keySounds) => set({keySounds}),
@@ -71,6 +85,8 @@ export const useSettingsStore = create<SettingsState>()(
       setOnlyAboveHorizon: (onlyAboveHorizon) => set({onlyAboveHorizon}),
       setDeclinationDeg: (declinationDeg) => set({declinationDeg}),
       setAutoSyncScope: (autoSyncScope) => set({autoSyncScope}),
+      setMountPreset: (mountPreset) => set({mountPreset}),
+      setTelemetryPrecision: (telemetryPrecision) => set({telemetryPrecision}),
     }),
     {
       name: 'autostardroid-settings',

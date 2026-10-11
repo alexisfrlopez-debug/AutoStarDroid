@@ -12,6 +12,7 @@ import {useTrackingStore, type TrackTarget} from '../store/trackingStore';
 import {telemetryFitOf, useTelemetryStore} from '../store/telemetryStore';
 import {autostar, gotoErrorText} from '../services/protocol/client';
 import {telemetryTracker} from '../services/tracking/tracker';
+import {validateFineTune, dismissFineTune} from '../services/tracking/fineTune';
 import {planetObjects as planetList} from '../services/catalog';
 import {planetRaDec, type PlanetName} from '../services/astro/planets';
 import {raDecToAltAz} from '../services/astro/coords';
@@ -23,11 +24,14 @@ export function TelemetryTracking() {
   const t = useT();
   const c = usePal();
   const site = useSettingsStore((st) => st.site);
+  const telemPrecision = useSettingsStore((st) => st.telemetryPrecision);
+  const setTelemPrecision = useSettingsStore((st) => st.setTelemetryPrecision);
   const connStatus = useScopeStore((st) => st.connStatus);
   const target = useTrackingStore((st) => st.target);
   const setTarget = useTrackingStore((st) => st.setTarget);
   const tracking = useTrackingStore((st) => st.tracking);
   const phase = useTrackingStore((st) => st.phase);
+  const fineTune = useTrackingStore((st) => st.fineTune);
   const lastErrArcmin = useTrackingStore((st) => st.lastErrArcmin);
   const corrections = useTrackingStore((st) => st.corrections);
   const signs = useTrackingStore((st) => st.signs);
@@ -168,6 +172,18 @@ export function TelemetryTracking() {
     }
   };
 
+  /** Validation du réglage fin : enregistre le point télémétrique (aucune
+   *  commande moteur — c'est un enregistrement qui affine le recalage). */
+  const doValidateFineTune = async () => {
+    setBusy(true);
+    try {
+      const ok = await validateFineTune();
+      if (!ok) Alert.alert(t.common.error, t.align.track.ftNoSensors);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const phaseLabel =
     phase === 'pulsing' ? t.align.track.phasePulsing
     : phase === 'centering' ? t.align.track.phaseCentering
@@ -251,6 +267,49 @@ export function TelemetryTracking() {
       />
       <Btn label={t.align.track.syncScope} onPress={doSync} disabled={busy || !target || connStatus !== 'connected'}
         variant="ghost" style={{marginTop: 6}} />
+
+      {/* PRÉCISION PAR TÉLÉMÉTRIE (v2.2.0) : réglage fin automatique à
+          chaque arrivée de GOTO (app ou raquette) + validation. */}
+      <Toggle
+        value={telemPrecision}
+        onChange={() => setTelemPrecision(!telemPrecision)}
+        label={telemPrecision ? t.align.track.ftOn : t.align.track.ftOff}
+      />
+      <Text style={{color: c.textFaint, fontSize: 11, marginTop: 2, marginBottom: 4}}>
+        {t.align.track.ftDesc}
+      </Text>
+
+      {/* BANNIÈRE DE VALIDATION du réglage fin (v2.2.0). */}
+      {fineTune.state === 'running' ? (
+        <View style={{backgroundColor: c.bgPanel2, borderRadius: 10, borderWidth: 1, borderColor: c.border, padding: 10, marginTop: 6}}>
+          <Text style={{color: c.amber, fontSize: 13, fontWeight: '700'}}>{t.align.track.ftRunning}</Text>
+          {fineTune.beforeArcmin != null ? (
+            <Text style={{color: c.textDim, fontSize: 12, marginTop: 2}}>
+              {t.align.track.err} {fineTune.beforeArcmin.toFixed(1)}′
+            </Text>
+          ) : null}
+        </View>
+      ) : null}
+      {fineTune.state === 'awaitValidation' ? (
+        <View style={{backgroundColor: c.bgPanel2, borderRadius: 10, borderWidth: 1, borderColor: c.amber, padding: 10, marginTop: 6}}>
+          <Text style={{color: c.amber, fontSize: 13, fontWeight: '700'}}>{t.align.track.ftAsk}</Text>
+          <Text style={{color: c.text, fontSize: 12, marginTop: 3, lineHeight: 17}}>
+            {fineTune.name ?? '—'} : {fineTune.beforeArcmin != null ? fineTune.beforeArcmin.toFixed(1) : '?'}′ →{' '}
+            {fineTune.afterArcmin != null ? fineTune.afterArcmin.toFixed(1) : '?'}′
+            {fineTune.iterations ? `  ·  ${fineTune.iterations} ${t.align.track.ftIters}` : ''}
+          </Text>
+          <Text style={{color: c.textDim, fontSize: 11, marginTop: 3, lineHeight: 16}}>{t.align.track.ftAskDesc}</Text>
+          <View style={[s.row, {marginTop: 8}]}>
+            <Btn label={t.align.track.ftValidate} onPress={() => void doValidateFineTune()} disabled={busy}
+              variant="primary" style={{flex: 1, marginRight: 5}} />
+            <Btn label={t.align.track.ftIgnore} onPress={dismissFineTune} disabled={busy}
+              style={{flex: 1, marginLeft: 5}} />
+          </View>
+        </View>
+      ) : null}
+      {fineTune.state === 'applied' ? (
+        <Text style={{color: c.green, fontSize: 12, marginTop: 6}}>{t.align.track.ftApplied}</Text>
+      ) : null}
 
       {/* Statut live */}
       <View style={[s.row, s.between, {marginTop: 12}]}>

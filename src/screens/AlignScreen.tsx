@@ -10,6 +10,7 @@ import {withAlt, DisplayObject} from '../services/catalog';
 import {BRIGHT_STARS} from '../services/catalog/stars';
 import {Btn, Card, Segmented, Title, usePal} from '../components/ui';
 import {StatusHeader} from '../components/StatusHeader';
+import {MountCard} from '../components/MountCard';
 import {TelemetryAlign} from '../components/TelemetryAlign';
 import {TelemetryTracking} from '../components/TelemetryTracking';
 import {MotorCalib} from '../components/MotorCalib';
@@ -103,6 +104,9 @@ export function AlignScreen() {
   return (
     <ScrollView style={{flex: 1, backgroundColor: c.bg}} contentContainerStyle={{padding: 12, paddingBottom: 40}}>
       <StatusHeader />
+      {/* Monture détectée + presets (v2.2.0) : butées/taux corrects pour
+          le diagnostic et les butées, corrigibles si mal détectés. */}
+      <MountCard />
       <Card style={{marginTop: 8}}>
         <Title text={t.align.mode} />
         <Segmented<'altaz' | 'polar' | 'land'>

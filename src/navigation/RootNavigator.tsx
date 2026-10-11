@@ -1,5 +1,5 @@
 /** Navigation racine : onglets bas (Raquette = interface unique du matériel). */
-import React from 'react';
+import React, {useEffect} from 'react';
 import {NavigationContainer, DefaultTheme} from '@react-navigation/native';
 import {createNativeStackNavigator} from '@react-navigation/native-stack';
 import {createBottomTabNavigator} from '@react-navigation/bottom-tabs';
@@ -15,6 +15,7 @@ import {SetupScreen} from '../screens/SetupScreen';
 import {ConnectScreen} from '../screens/ConnectScreen';
 import {HandboxScreen} from '../screens/HandboxScreen';
 import {ConsoleScreen} from '../screens/ConsoleScreen';
+import {initFineTune} from '../services/tracking/fineTune';
 
 const Stack = createNativeStackNavigator();
 const Tabs = createBottomTabNavigator();
@@ -65,6 +66,11 @@ function MainTabs() {
 export function RootNavigator() {
   const nv = useSettingsStore((s) => s.nightVision);
   const c = theme(nv);
+  // Réglage fin télémétrique après GOTO (v2.2.0) : abonné UNE fois pour
+  // toute la session, quel que soit l'onglet d'où part le pointage.
+  useEffect(() => {
+    initFineTune();
+  }, []);
   const navTheme = {
     ...DefaultTheme,
     dark: true,

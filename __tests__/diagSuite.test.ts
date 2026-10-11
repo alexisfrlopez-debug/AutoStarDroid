@@ -40,6 +40,7 @@ import {
   rateProfileDegPerSec,
   drivetrainStats,
   motionStopTime,
+  approachStopDecision,
 } from '../src/services/astro/diag';
 import {setDiagSleepForTests, setDiagNowForTests, diagRunner, DIAG_TOTAL_S} from '../src/services/tracking/diagService';
 import {autostar} from '../src/services/protocol/client';
@@ -201,6 +202,30 @@ describe('Partie A — motionStopTime (butées d\'élévation)', () => {
   });
 });
 
+describe('Partie A — approachStopDecision (butées v2.2.0)', () => {
+  it('taux nominal → run', () => {
+    expect(approachStopDecision([0.4, 0.4, 0.4], 0.4)).toBe('run');
+    expect(approachStopDecision([], 0.4)).toBe('run');
+  });
+  it('taux en chute (55 %) → slowdown : passer en vitesse douce', () => {
+    expect(approachStopDecision([0.4, 0.35, 0.2], 0.4)).toBe('slowdown');
+  });
+  it('arrêt soutenu (2 s sous 30 %) → stopped : butée atteinte', () => {
+    const rates = [0.4, 0.4, 0.4, 0.01, 0.01, 0.01, 0.01, 0.01];
+    expect(approachStopDecision(rates, 0.4)).toBe('stopped');
+    // 3 bins seulement suffisent (1,2 s) si tous sous le seuil
+    expect(approachStopDecision([0.4, 0.01, 0.01, 0.01], 0.4)).toBe('stopped');
+  });
+  it('un simple creux bref ne déclenche PAS l’arrêt', () => {
+    const rates = [0.4, 0.4, 0.4, 0.01, 0.4, 0.4, 0.4, 0.4];
+    expect(approachStopDecision(rates, 0.4)).toBe('run');
+  });
+  it('seuils absolus de plancher (faibles taux attendus)', () => {
+    // center 0,08 : 30 % = 0,024 → au-dessus du plancher 0,02
+    expect(approachStopDecision([0.08, 0.08, 0.02, 0.02, 0.02], 0.08)).toBe('stopped');
+  });
+});
+
 /* ================================================================== */
 /* PARTIE B — orchestration complète (transport + gyro + horloge virt) */
 /* ================================================================== */
@@ -242,6 +267,17 @@ class ReplTransport implements Transport {
     else if (data === ':Gd#') this.reply('+45:00#');
     else if (data === ':GVP#') this.reply('Autostar#');
     else if (data === ':GVN#') this.reply('43Eg#');
+    // v2.2.0 : réponses d'accusé (horloge/site), cibles, écran LCD idle
+    else if (data.startsWith(':SG') || data.startsWith(':SL') || data.startsWith(':SC')
+      || data.startsWith(':St') || data.startsWith(':Sg')) this.reply('1#');
+    else if (data.startsWith(':Sr') || data.startsWith(':Sd')) this.reply('1#');
+    else if (data === ':MS#') this.reply('0#');
+    else if (data === ':D#') this.reply('#'); // monture à l'arrêt
+    else if (data.startsWith(':EK')) { /* touches : rien */ }
+    else if (data.startsWith(':ED#')) {
+      // écran d'accueil : marqueur + 'Objet' + ligne 2 vide (2×16 = 32 car.)
+      this.reply('\u0080Objet           ' + '                ' + '#');
+    }
   }
 
   get gyroRateDegPerSec(): number {
@@ -308,7 +344,7 @@ describe('Partie B — suite autonome complète (horloge virtuelle)', () => {
     const events: any[] = [];
     const report = await diagRunner.run((e) => events.push(e));
 
-    expect(report.results.length).toBe(8);
+    expect(report.results.length).toBe(10);
     expect(report.aborted).toBe(false);
     const statuses = Object.fromEntries(report.results.map((r) => [r.id, r.status]));
 
@@ -325,11 +361,13 @@ describe('Partie B — suite autonome complète (horloge virtuelle)', () => {
     expect(stored).not.toBeNull();
     expect(stored!.e).toBeCloseTo(0.08, 4); // mise à jour de la raquette
 
-    // ratio : 0,08/0,08 = 100 %, linéarité find/center = 100 % → OK
+    // ratio : 0,08/0,08 = 100 %, linéarité find = 100 %, slew ≈ 96 % (bin
+    // frontière du mock gyro) → ratioStatus(96) = OK
     expect(statuses.ratio).toBe('ok');
     const ratio = byId(report.results, 'ratio')!;
     expect(ratio.values.pctE!).toBeCloseTo(100, 1);
     expect(ratio.values.linearityPct!).toBeCloseTo(100, 1);
+    expect(ratio.values.pctSlew!).toBeGreaterThan(90);
 
     // backlash : reprise immédiate au gyro (0,05 s → ≈ 14″) → OK
     expect(statuses.backlash).toBe('ok');
@@ -349,16 +387,30 @@ describe('Partie B — suite autonome complète (horloge virtuelle)', () => {
     expect(dt.values.pctP2PE!).toBeLessThan(5);
     expect(dt.values.stallsE).toBe(0);
 
-    // min/max élévation : 15 s de montée à 0,08 °/s → 1,2°, alt 45 ± 1,2
+    // min/max élévation v2.2.0 : jambes à la vitesse find (0,4 °/s) bornées
+    // par la course du preset générique (45°→90° = 168 s de garde) — la
+    // monture SAINED déplace 0,4×168 ≈ 67° par jambe, sans toucher la butée.
     expect(statuses.limits).toBe('ok');
     const li = byId(report.results, 'limits')!;
-    expect(li.values.upDeg!).toBeCloseTo(1.2, 1);
     expect(li.values.altStartDeg!).toBeCloseTo(45, 1);
-    expect(li.values.maxAltDeg!).toBeCloseTo(46.2, 1);
-    expect(li.values.minAltDeg!).toBeCloseTo(43.8, 1);
+    expect(li.values.upDeg!).toBeGreaterThan(60);
+    expect(li.values.upDeg!).toBeLessThan(75);
+    expect(li.values.downDeg!).toBeGreaterThan(60);
+    expect(li.values.hitUp).toBe(0); // pas de butée sur monture libre
+    expect(li.values.hitDown).toBe(0);
+    expect(li.values.maxAltDeg!).toBeCloseTo(90, 0);  // reconstruction bornée
+    expect(li.values.minAltDeg!).toBeCloseTo(0, 0);
+
+    // GOTO de contrôle : sans point d'alignement télémétrique → IGNORÉ
+    expect(statuses.goto).toBe('skipped');
 
     // dérive : gyro immobile → 0″/s vs sidéral 15,04 → écart −15 → ATTENTION
     expect(statuses.drift).toBe('warn');
+
+    // mise à jour raquette : horloge/site acquittés ('1'), rétro-jeu non
+    // poussé (menu Configuration introuvable sur l'écran figé) → ATTENTION
+    expect(statuses.handbox).toBe('warn');
+    expect(byId(report.results, 'handbox')!.values.clockOk).toBe(1);
 
     // progression : dernier événement ~ 99 %
     expect(events.length).toBeGreaterThan(20);
@@ -368,9 +420,9 @@ describe('Partie B — suite autonome complète (horloge virtuelle)', () => {
     // la monture a bien été STOPPÉE en fin de suite (:Q#)
     expect(tp.writes.filter((w) => w === ':Q#').length).toBeGreaterThanOrEqual(2);
 
-    // durée totale estimée cohérente (> 3 min réelles annoncées à l'UI)
-    expect(DIAG_TOTAL_S).toBeGreaterThan(180);
-  }, 30000);
+    // durée totale estimée cohérente (> 5 min réelles annoncées à l'UI)
+    expect(DIAG_TOTAL_S).toBeGreaterThan(300);
+  }, 45000);
 
   it('ABORT en cours de suite → rapport partiel, tests restants ignorés', async () => {
     abortAtCall = 40; // abort déclenché au 40e sommeil (pendant backlash/précision)
@@ -386,7 +438,7 @@ describe('Partie B — suite autonome complète (horloge virtuelle)', () => {
   it('raquette déconnectée → échec des tests, aucun moteur commandé', async () => {
     useScopeStore.getState().setConnStatus('disconnected');
     const report = await diagRunner.run(() => undefined);
-    expect(report.results.length).toBe(8);
+    expect(report.results.length).toBe(10);
     const okCount = report.results.filter((r) => r.status === 'ok').length;
     expect(okCount).toBe(0);
     expect(byId(report.results, 'pre')!.status).toBe('fail');

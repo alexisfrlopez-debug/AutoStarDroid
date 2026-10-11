@@ -13,7 +13,10 @@ import {useState} from 'react';
 import {View, Text, TouchableOpacity, Alert} from 'react-native';
 import {useT} from '../i18n';
 import {useScopeStore} from '../store/scopeStore';
+import {useSettingsStore} from '../store/settingsStore';
 import {useDiagStore} from '../store/diagStore';
+import {useMotorCalibStore} from '../store/motorCalibStore';
+import {pushCalibToHandbox} from '../services/protocol/handboxPush';
 import {
   diagRunner,
   DIAG_TEST_DURATIONS_S,
@@ -34,10 +37,16 @@ const STATUS_COLOR: Record<DiagStatus, string> = {
 /** Formatage d'une valeur selon sa clé (déjà renommée en clé i18n v*). */
 function fmtValue(key: string, v: number | null): string {
   if (v == null) return '—';
-  // Pourcentages : ratios, linéarité, oscillation/RMS, répétabilité
+  // Booléens encodés (succès GOTO / horloge poussée, butées touchées)
+  if (key === 'vGotoOk' || key === 'vClockOk') return v >= 1 ? '✓' : '✗';
+  if (key === 'vHitUp' || key === 'vHitDown') return v >= 1 ? '✓' : '✗';
+  // Erreur de pointage en minutes d'arc
+  if (key === 'vGotoErr') return `${v < 10 ? v.toFixed(1) : v.toFixed(0)}′`;
+  // Pourcentages : ratios, linéarité, oscillation/RMS, répétabilité, rétro-jeu
   const pct = key === 'vPctN' || key === 'vPctS' || key === 'vPctE' || key === 'vPctW'
     || key === 'vLinearity' || key === 'vRel'
-    || key === 'vP2PE' || key === 'vP2PN' || key === 'vRmsE' || key === 'vRmsN';
+    || key === 'vP2PE' || key === 'vP2PN' || key === 'vRmsE' || key === 'vRmsN'
+    || key === 'vPctSlew' || key === 'vRaPct' || key === 'vDecPct';
   if (pct) return `${v.toFixed(v < 10 ? 1 : 0)} %`;
   // Angles de jeu en secondes d'arc
   if (key === 'vRa' || key === 'vDec') return `${v < 10 ? v.toFixed(1) : v.toFixed(0)}″`;
@@ -64,6 +73,9 @@ export function Diagnostics() {
   const setReport = useDiagStore((st) => st.setReport);
   const setRunning = useDiagStore((st) => st.setRunning);
   const clear = useDiagStore((st) => st.clear);
+  const site = useSettingsStore((st) => st.site);
+  const backlash = useMotorCalibStore((st) => st.backlash);
+  const [pushing, setPushing] = useState(false);
 
   const [ev, setEv] = useState<DiagEvent | null>(null);
 
@@ -103,6 +115,23 @@ export function Diagnostics() {
 
   const abort = () => diagRunner.abort();
 
+  /** Mise à jour MANUELLE de la raquette (horloge/site + rétro-jeu mesuré)
+   *  — la même action que l'étape automatique de fin de diagnostic. */
+  const pushNow = async () => {
+    setPushing(true);
+    try {
+      const rep = await pushCalibToHandbox({latDeg: site.latDeg, lonDeg: site.lonDeg, backlash});
+      const msg = rep.clock === 'ok'
+        ? (rep.backlashRa === 'ok' || rep.backlashDec === 'ok') ? dx.pushOkMsg : dx.pushClockOnly
+        : dx.pushFail;
+      Alert.alert(rep.clock === 'ok' ? t.common.success : t.common.error, msg);
+    } catch (_) {
+      Alert.alert(t.common.error, dx.pushFail);
+    } finally {
+      setPushing(false);
+    }
+  };
+
   const testName = (id: DiagTestId): string =>
     (dx as Record<string, string>)[`testName${id.charAt(0).toUpperCase()}${id.slice(1)}`] ?? id;
 
@@ -119,12 +148,14 @@ export function Diagnostics() {
       pctN: 'vPctN', pctS: 'vPctS', pctE: 'vPctE', pctW: 'vPctW',
       raArcsec: 'vRa', decArcsec: 'vDec',
       altStartDeg: 'vAltStart', maxAltDeg: 'vMaxAlt', minAltDeg: 'vMinAlt',
-      upDeg: 'vUp', downDeg: 'vDown',
+      upDeg: 'vUp', downDeg: 'vDown', hitUp: 'vHitUp', hitDown: 'vHitDown',
+      gotoErrArcmin: 'vGotoErr', gotoOk: 'vGotoOk',
+      clockOk: 'vClockOk', raPct: 'vRaPct', decPct: 'vDecPct',
       driftDegPerSec: 'vDrift', vsSiderealArcsecPerSec: 'vVsSidereal',
       pctP2PE: 'vP2PE', rmsPctE: 'vRmsE', stallsE: 'vStallE',
       pctP2PN: 'vP2PN', rmsPctN: 'vRmsN', stallsN: 'vStallN',
       biasMagDegPerSec: 'vBias', ambientNoiseDegPerSec: 'vNoise',
-      linearityPct: 'vLinearity',
+      linearityPct: 'vLinearity', pctSlew: 'vPctSlew',
       meanDeg: 'vMean', stdDeg: 'vStd', spreadDeg: 'vSpread', relPct: 'vRel',
     };
     return Object.entries(r.values).map(([k, v]) => [rename[k] ?? k, v] as [string, number | null]);
@@ -166,6 +197,17 @@ export function Diagnostics() {
           style={{marginTop: 10}}
         />
       )}
+
+      {/* Mise à jour manuelle de la raquette (horloge/site + rétro-jeu) */}
+      {connStatus === 'connected' ? (
+        <Btn
+          label={pushing ? dx.pushing : dx.pushBtn}
+          onPress={() => void pushNow()}
+          disabled={pushing}
+          variant="ghost"
+          style={{marginTop: 8}}
+        />
+      ) : null}
 
       {/* Résultats persistés */}
       <View style={[s.row, s.between, {marginTop: 14}]}>

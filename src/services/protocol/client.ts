@@ -644,6 +644,15 @@ export class AutostarClient {
     return parseLcdReply(reply);
   }
 
+  /** Réponse BRUTE :ED# (marqueur inclus, '#' retiré par le parseur de
+   *  réponses) — pour les pilotes qui lisent la flèche de SÉLECTION (octet
+   *  de contrôle en tête de la ligne sélectionnée) : navigation des menus
+   *  de la raquette physique (handboxPush v2.2.0). */
+  async getLcdRaw(): Promise<string | null> {
+    const reply = await this.cmd(':ED#', 900, /^[\u0080-\u00FF]/).catch(() => '');
+    return reply && reply.length >= 32 ? reply : null;
+  }
+
   /**
    * Simule un appui de touche SUR la raquette physique (:EK<ascii>#).
    * La raquette réagit exactement comme si la touche avait été pressée
@@ -849,7 +858,9 @@ export class AutostarClient {
   /** Suit la fin du GOTO par :D# ("|" pendant le moteur, vide à l'arrivée).
    *  Boucle tolérante : les raquettes muettes pendant un moteur ne coupent
    *  pas la surveillance ; la moindre réponse vide ou stabilisation de
-   *  position clôt l'épisode. Fire-and-forget (max 3 min). */
+   *  position clôt l'épisode. Fire-and-forget (max 3 min).
+   *  À l'ARRIVÉE, les auditeurs v2.2.0 sont notifiés (réglage fin
+   *  télémétrique automatique — cf. fineTune.ts). */
   private watchSlewEnd(cycles = 0) {
     if (cycles > 260) return; // ~3 min à 700 ms
     setTimeout(() => {
@@ -860,12 +871,50 @@ export class AutostarClient {
             const s = useScopeStore.getState();
             s.pushLog('info', 'GOTO terminé (monture arrivée)');
             this.ownMoveUntil = Date.now() + 1200;
+            this.notifyGotoArrival();
           } else {
             this.watchSlewEnd(cycles + 1);
           }
         })
         .catch(() => this.watchSlewEnd(cycles + 1)); // muette : on réessaie
     }, 700);
+  }
+
+  /* ---------- auditeurs d'arrivée GOTO (v2.2.0) ---------- */
+
+  /** Auditeurs notifiés quand un GOTO (app OU raquette physique, via la
+   *  surveillance :D#) est terminé. JS pur — jamais transmis au natif. */
+  private gotoArrivalCbs = new Set<(raDeg: number | null, decDeg: number | null) => void>();
+
+  /** Enregistre un auditeur d'arrivée GOTO ; renvoie la fonction de retrait. */
+  onGotoArrival(cb: (raDeg: number | null, decDeg: number | null) => void): () => void {
+    this.gotoArrivalCbs.add(cb);
+    return () => {this.gotoArrivalCbs.delete(cb);};
+  }
+
+  private notifyGotoArrival() {
+    const ra = this.lastRaDeg;
+    const dec = this.lastDecDeg;
+    for (const cb of [...this.gotoArrivalCbs]) {
+      try {cb(ra, dec);} catch (_) { /* un auditeur fautif ne bloque pas les autres */ }
+    }
+  }
+
+  /** Dernière position AD/DEC lue de la raquette (null si jamais lue). */
+  get scopeRaDec(): {raDeg: number; decDeg: number} | null {
+    if (this.lastRaDeg == null || this.lastDecDeg == null) return null;
+    return {raDeg: this.lastRaDeg, decDeg: this.lastDecDeg};
+  }
+
+  /** Le moteur est-il en marche ? (:D# — "|" en mouvement, vide à l'arrêt).
+   *  null = raquette muette (réponse indéterminée). */
+  async isMoving(): Promise<boolean | null> {
+    try {
+      const d = await this.cmd(':D#', 1500);
+      return d.includes('|');
+    } catch (_) {
+      return null;
+    }
   }
 
   async syncHere(): Promise<void> {

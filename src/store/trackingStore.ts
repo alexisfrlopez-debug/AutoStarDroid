@@ -32,10 +32,30 @@ export interface CorrectionLogLine {
 
 export type TrackPhase = 'idle' | 'running' | 'centering' | 'pulsing';
 
+/** Réglage fin télémétrique après GOTO (v2.2.0) — machine à états affichée
+ *  dans le panneau de suivi : mesure avant correction, correction
+ *  automatique, ATTENTE DE VALIDATION utilisateur, applied/dismissed. */
+export interface FineTuneInfo {
+  state: 'idle' | 'running' | 'awaitValidation' | 'applied' | 'dismissed';
+  /** Erreur de pointage AVANT correction (min d'arc). */
+  beforeArcmin: number | null;
+  /** Erreur APRÈS correction (min d'arc). */
+  afterArcmin: number | null;
+  iterations: number;
+  /** Objet concerné (affichage). */
+  name: string | null;
+}
+
+export const FINE_TUNNE_IDLE: FineTuneInfo = {
+  state: 'idle', beforeArcmin: null, afterArcmin: null, iterations: 0, name: null,
+};
+
 interface TrackingState {
   target: TrackTarget | null;
   phase: TrackPhase;
   tracking: boolean;
+  /** Réglage fin télémétrique (v2.2.0). */
+  fineTune: FineTuneInfo;
   /** Dernière erreur totale mesurée (minutes d'arc). */
   lastErrArcmin: number | null;
   lastErrAt: number;
@@ -45,6 +65,7 @@ interface TrackingState {
   setTarget: (t: TrackTarget | null) => void;
   setPhase: (p: TrackPhase) => void;
   setTracking: (v: boolean) => void;
+  setFineTune: (f: Partial<FineTuneInfo>) => void;
   setErr: (arcmin: number | null) => void;
   setSigns: (s: PulseSigns) => void;
   bumpCorrections: () => void;
@@ -56,6 +77,7 @@ export const useTrackingStore = create<TrackingState>((set) => ({
   target: null,
   phase: 'idle',
   tracking: false,
+  fineTune: FINE_TUNNE_IDLE,
   lastErrArcmin: null,
   lastErrAt: 0,
   corrections: 0,
@@ -64,12 +86,13 @@ export const useTrackingStore = create<TrackingState>((set) => ({
   setTarget: (target) => set({target}),
   setPhase: (phase) => set({phase}),
   setTracking: (tracking) => set({tracking}),
+  setFineTune: (f) => set((s) => ({fineTune: {...s.fineTune, ...f}})),
   setErr: (lastErrArcmin) => set({lastErrArcmin, lastErrAt: Date.now()}),
   setSigns: (signs) => set({signs}),
   bumpCorrections: () => set((s) => ({corrections: s.corrections + 1})),
   pushLog: (l) => set((s) => ({log: [...s.log.slice(-39), {...l, ts: Date.now()}]})),
   reset: () => set({
     phase: 'idle', tracking: false, lastErrArcmin: null, lastErrAt: 0,
-    corrections: 0, log: [],
+    corrections: 0, log: [], fineTune: FINE_TUNNE_IDLE,
   }),
 }));

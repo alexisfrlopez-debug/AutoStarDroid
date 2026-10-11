@@ -254,3 +254,53 @@ export function motionStopTime(
   }
   return null;
 }
+
+/* ------------------------------------------------------------------ */
+/* Approche de butée en 2 étages (v2.2.0)                               */
+/* ------------------------------------------------------------------ */
+
+export type ApproachDecision = 'run' | 'slowdown' | 'stopped';
+
+/**
+ * Décision d'approche pendant une jambe du test des butées, d'après les
+ * taux récents (deg/s, le plus récent en DERNIER) et le taux attendu :
+ *  - 'run'      : le tube avance à (près de) la vitesse commandée ;
+ *  - 'slowdown' : le taux est tombé sous slowRatio × attendu — le tube
+ *                 approche une résistance (butée, limite logicielle) :
+ *                 PASSER EN VITESSE LENTE pour finir doucement ;
+ *  - 'stopped'  : le taux est resté sous stopRatio × attendu pendant
+ *                 sustainMs — le tube est À L'ARRÊT malgré la commande :
+ *                 BUTEE ATTEINTE (ou obstacle).
+ *
+ * v2.1.0 : la détection demandait un arrêt de 600 ms à 35 % du taux — mais
+ * la jambe ne durait que 15 s à la vitesse center (~1,2° de course !) : la
+ * butée n'était JAMAIS réellement atteinte et le moindre creux de bruit
+ * gyro passait pour un arrêt. v2.2.0 : jambes bornées par la course réelle
+ * du preset (limitLegGuardSec), vitesse rapide puis approche lente, arrêt
+ * confirmé sur une fenêtre longue (2,5 s) + recoup :Ga# côté orchestrateur.
+ */
+export function approachStopDecision(
+  recentRatesDegPerSec: number[],
+  expectedRateDegPerSec: number,
+  opts?: {slowRatio?: number; stopRatio?: number; sustainCount?: number},
+): ApproachDecision {
+  if (recentRatesDegPerSec.length === 0) return 'run';
+  const slowRatio = opts?.slowRatio ?? 0.55;
+  const stopRatio = opts?.stopRatio ?? 0.30;
+  const sustainCount = opts?.sustainCount ?? 5; // ×400 ms d'échantillonnage = 2 s
+  const last = recentRatesDegPerSec[recentRatesDegPerSec.length - 1];
+  // Arrêt soutenu : les ~1,2 s DERNIERS bins (3 × 400 ms) tous sous
+  // stopRatio × attendu. Le bruit gyro ambiant étant ~0,02-0,05 °/s, le
+  // seuil absolu 0,015 °/s seul est trop bas près du bruit — le RATIO au
+  // taux commandé est la vraie info. Un creux bref (1 bin) ne déclenche
+  // jamais l'arrêt : les 3 bins consécutifs finaux sont exigés.
+  const stopThresh = Math.max(0.02, expectedRateDegPerSec * stopRatio);
+  const tail = recentRatesDegPerSec.slice(-sustainCount);
+  const last3 = tail.slice(-3);
+  if (last3.length >= 3 && last3.every((r) => r < stopThresh)) {
+    return 'stopped';
+  }
+  const slowThresh = Math.max(0.03, expectedRateDegPerSec * slowRatio);
+  if (last < slowThresh) return 'slowdown';
+  return 'run';
+}
