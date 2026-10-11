@@ -123,7 +123,7 @@ export const fr: Dict = {
       waitPos: 'Attente position…',
       lcdMute: 'Position muette',
       lcdInit: 'Non initialisée',
-      errNoPos: 'Liaison active mais la raquette ne renvoie aucune position AD/DEC. Vérifiez que la raquette est bien reliée à la monture, que celle-ci est sous tension, et que la raquette a terminé son initialisation (écran principal atteint). La synchro reste active : le miroir reprendra dès la première position.',
+      errNoPos: 'Liaison ouverte mais la raquette ne renvoie aucune position. Vérifiez : 1) le câble et l\'adaptateur série (un câble bas de gamme ou mal enfoncé reste muet — DTR/RTS sont désormais assertés automatiquement à l\'ouverture), 2) la monture reliée et sous tension, 3) la raquette initialisée (écran principal atteint). La synchro reste active : si l\'horizontale répond, le miroir bascule sur ALT/AZ ; sinon il reprendra dès la première position.',
       errInit: 'La raquette répond 00h00 / +00°00 : initialisation ou alignement non terminé. Terminez l\'alignement sur la raquette physique (ou « Config › Site » dans l\'app) — le miroir reprendra automatiquement.',
     },
     msgs: {

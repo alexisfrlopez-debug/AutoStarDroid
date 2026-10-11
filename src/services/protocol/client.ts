@@ -8,7 +8,7 @@ import {TcpTransport} from '../connection/tcp';
 import {BluetoothTransport} from '../connection/bluetooth';
 import {UsbTransport} from '../connection/usb';
 import {DemoTransport, setDemoSite} from '../connection/demo';
-import {PROFILES, SPEED_CMDS} from './profiles';
+import {SPEED_CMDS} from './profiles';
 import {proto} from '../astro/time';
 import type {ScopeModelId} from '../../store/settingsStore';
 import {useSettingsStore} from '../../store/settingsStore';
@@ -99,6 +99,10 @@ export class AutostarClient {
   private lastRaDeg: number | null = null;
   private lastDecDeg: number | null = null;
   private lastPosAt = 0; // horodatage de la dernière lecture AD/DEC complète
+  /** Dernier alt/az lu (repli de mouvement quand AD/DEC est muet). */
+  private lastAltDeg: number | null = null;
+  private lastAzDeg: number | null = null;
+  private lastAltAzAt = 0;
   private lastProbeAt = 0; // dernier diagnostic :GVP# (mode muet)
   private muteLogged = false; // message « muette » déjà journalisé ?
   /** Fenêtre pendant laquelle un mouvement est attribué à L'APP (commandes
@@ -165,10 +169,14 @@ export class AutostarClient {
       throw e;
     }
     this.transport = transport;
-    const profile = PROFILES[model];
-    if (profile.wake && transport.type !== 'demo') {
-      // ESC ESC : bascule les Autostar #49x en mode PC série
-      try {await transport.write('\x1b\x1b'); await sleep(300);} catch (_) {}
+    if (transport.type !== 'demo') {
+      // ESC ESC SYSTÉMATIQUE (sauf démo) : bascule les Autostar #49x en mode
+      // PC série. Le besoin dépend du MATÉRIEL réel, pas du modèle choisi —
+      // l'envoyer quel que soit le modèle garantit qu'un #497 répond même si
+      // la présélection était mauvaise (les autres raquettes ignorent ces
+      // octets). Sans cela, un #497 réveillé en dernier restait muet : c'est
+      // le volet « liaison » du miroir qui ne démarrait jamais.
+      try {await transport.write('\x1b\x1b'); await sleep(500);} catch (_) {}
       this.log('info', 'Séquence ESC ESC envoyée (mode PC série Autostar)');
     }
     useScopeStore.getState().setConnStatus('connected');
@@ -224,6 +232,9 @@ export class AutostarClient {
     this.buffer = '';
     this.lastRaDeg = null;
     this.lastDecDeg = null;
+    this.lastAltDeg = null;
+    this.lastAzDeg = null;
+    this.lastAltAzAt = 0;
     this.lastMovedFlag = false;
     this.lastExternalAt = 0;
     this.prevPosAt = 0;
@@ -335,15 +346,20 @@ export class AutostarClient {
    * Autostar est minuscule, deux commandes collées peuvent perdre la 2e.
    */
   async readPosition(): Promise<{raDeg: number | null; decDeg: number | null}> {
+    // Timeout ADAPTATIF : si aucun axe ne répond depuis plusieurs cycles
+    // (liaison muette), on raccourcit l'attente pour ne pas geler le rythme
+    // du miroir ni retarder la reprise dès que la raquette se réveille.
+    const mute = this.lastPosAt > 0 && Date.now() - this.lastPosAt > 6000;
+    const timeout = mute ? 1800 : 3000;
     let raDeg: number | null = null;
     let decDeg: number | null = null;
     try {
-      const ra = await this.cmd(':Gr#', 3000, VALID.ra);
+      const ra = await this.cmd(':Gr#', timeout, VALID.ra);
       raDeg = parseRa(ra);
     } catch (_) { /* axe muet ce cycle */ }
     await sleep(40);
     try {
-      const dec = await this.cmd(':Gd#', 3000, VALID.dec);
+      const dec = await this.cmd(':Gd#', timeout, VALID.dec);
       decDeg = parseDec(dec);
     } catch (_) { /* axe muet ce cycle */ }
     return {raDeg, decDeg};
@@ -526,11 +542,20 @@ export class AutostarClient {
         const now = Date.now();
         if (raDeg === null && decDeg === null) {
           // les 2 axes muets ce cycle — pendant un moteur c'est normal
-          // (beaucoup de raquettes cessent de répondre au port série)
-          const busy = this.lastMovedFlag || this.holding.size > 0 ||
-            now - this.lastExternalAt < 3000;
-          if (!busy) this.failCount += 1;
-          this.applyHint(s, now);
+          // (beaucoup de raquettes cessent de répondre au port série).
+          // REPLI ALT/AZ (v1.8.0) : des raquettes répondent :Ga#/:Gz# même
+          // quand :Gr#/:Gd# tardent — le miroir continue via l'horizontale
+          // (mouvement physique → croix allumée, slew rapide, écran ALT/AZ).
+          let altAzHandled = false;
+          if (this.pollAltAzOn) {
+            altAzHandled = await this.readAltAzAndDetect(s, now);
+          }
+          if (!altAzHandled) {
+            const busy = this.lastMovedFlag || this.holding.size > 0 ||
+              now - this.lastExternalAt < 3000;
+            if (!busy) this.failCount += 1;
+            this.applyHint(s, now);
+          }
         } else {
           this.failCount = 0;
           this.lastPosAt = now;
@@ -618,8 +643,14 @@ export class AutostarClient {
    *  puis 'mute' après ~6 s — la synchro RESTE LIVE, aucune retombée en
    *  erreur : la sonde :GVP# distingue raquette muette sur la position
    *  (monture non reliée/hors tension, raquette pas initialisée) et liaison
-   *  morte. La moindre position valide rétablit le miroir instantanément. */
+   *  morte. La moindre position valide rétablit le miroir instantanément.
+   *  EXCEPTION (v1.8.0) : si l'alt/az est lu en continu, la liaison vit et
+   *  le miroir est alimenté par l'horizontale — aucun diagnostic d'attente. */
   private applyHint(s: ReturnType<typeof useScopeStore.getState>, now: number) {
+    if (this.lastAltAzAt && now - this.lastAltAzAt < 4000) {
+      s.setHbHint('none');
+      return;
+    }
     if (!this.lastPosAt) {
       s.setHbHint('wait'); // première position pas encore lue : bref et normal
       return;
@@ -650,7 +681,49 @@ export class AutostarClient {
     }
   }
 
-  private async pollAltAz() {
+  /** Lecture alt/az + détection de mouvement (repli quand AD/DEC est muet).
+   *  Renvoie true si les 2 axes ont été lus ce cycle : la synchro est alors
+   *  alimentée par l'horizontale (croix, slew rapide) et reste sans diagnostic.
+   *  Les deltas alt/az suivent les mêmes seuils que AD/DEC (ce sont des degrés). */
+  private async readAltAzAndDetect(s: ReturnType<typeof useScopeStore.getState>, now: number): Promise<boolean> {
+    const aa = await this.pollAltAz();
+    if (!aa) return false;
+    const {altDeg, azDeg} = aa;
+    this.failCount = 0;
+    const havePrev = this.lastAltDeg !== null && this.lastAzDeg !== null && this.lastAltAzAt > 0;
+    if (havePrev) {
+      const el = Math.min(Math.max((now - this.lastAltAzAt) / 1000, 0.3), 6);
+      const th = Math.max(0.0028, el * 0.0076); // ~10" … au-dessus du suivi sidéral
+      let dAz = azDeg - (this.lastAzDeg as number);
+      if (dAz > 180) dAz -= 360; else if (dAz < -180) dAz += 360; // raccord nord
+      const dAlt = altDeg - (this.lastAltDeg as number);
+      const moved = Math.abs(dAz) + Math.abs(dAlt) > th;
+      const appOwned = this.holding.size > 0 || now < this.ownMoveUntil;
+      const external = moved && !appOwned;
+      let dirs: {n: boolean; s: boolean; e: boolean; w: boolean} | null = null;
+      if (external) {
+        const thD = 0.0014; // ~5"
+        dirs = {n: dAlt > thD, s: dAlt < -thD, e: dAz > thD, w: dAz < -thD};
+        if (!dirs.n && !dirs.s && !dirs.e && !dirs.w) dirs = null;
+        this.lastExternalAt = now;
+        // Slew rapide constaté par l'horizontale (= GOTO ou flèche rapide)
+        if ((Math.abs(dAz) + Math.abs(dAlt)) / el > 1.0) {
+          this.slewFastUntil = now + 1200;
+        }
+      }
+      s.setHbMoving(moved);
+      s.setHbExternal(external);
+      s.setHbDirs(dirs);
+      s.setHbSlewFast(now < this.slewFastUntil);
+    }
+    this.lastAltDeg = altDeg;
+    this.lastAzDeg = azDeg;
+    this.lastAltAzAt = now;
+    s.setHbHint('none');
+    return true;
+  }
+
+  private async pollAltAz(): Promise<{altDeg: number; azDeg: number} | null> {
     const [alt, az] = await Promise.all([
       this.cmd(':Ga#', 2500, VALID.dec).catch(() => ''),
       this.cmd(':Gz#', 2500, VALID.dec).catch(() => ''),
@@ -659,7 +732,9 @@ export class AutostarClient {
     const azDeg = parseDec(az.trim().match(/^[+-]/) ? az : `+${az}`);
     if (altDeg !== null && azDeg !== null) {
       useScopeStore.getState().setAltAz(altDeg, azDeg);
+      return {altDeg, azDeg};
     }
+    return null;
   }
 
   private stopPoll() {

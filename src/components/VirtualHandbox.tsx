@@ -178,20 +178,28 @@ export function VirtualHandbox() {
   /* ---------- Actions protocole ---------- */
   const connected = connStatus === 'connected';
 
-  async function gotoObject(o: DisplayObject) {
+  /** Pointe des coordonnées brutes (cible sélectionnée ici ou ailleurs dans
+   *  l'app) — socle commun de GO TO, depuis les menus ou depuis l'écran
+   *  miroir (l'équivalent de la touche GO TO de la raquette physique, qui
+   *  pointe le dernier objet sélectionné sur son propre clavier). */
+  async function gotoRaDecTarget(raDeg: number, decDeg: number, name: string) {
     if (!connected) {showMsg(t.errors.notConnected); return;}
     try {
-      showMsg(`GOTO ${o.name}…`, 6000);
-      const r = await autostar.gotoRaDec(o.raDeg, o.decDeg);
+      showMsg(`GOTO ${(name || '').slice(0, 12) || '…'}`, 6000);
+      const r = await autostar.gotoRaDec(raDeg, decDeg);
       if (r === 'ok') {
-        useScopeStore.getState().setTarget(o.raDeg, o.decDeg, o.name);
-        showMsg(`${o.name.slice(0, 12)} OK`, 4000);
+        useScopeStore.getState().setTarget(raDeg, decDeg, name);
+        showMsg(`${(name || 'OK').slice(0, 12)} OK`, 4000);
       } else {
         showMsg(r === 'belowHorizon' ? t.objects.belowHorizon : t.hb.msgs.noObject, 4000);
       }
     } catch (e) {
       showMsg((e as Error).message, 4000);
     }
+  }
+
+  async function gotoObject(o: DisplayObject) {
+    await gotoRaDecTarget(o.raDeg, o.decDeg, o.name);
   }
 
   function syncPhone() {
@@ -288,9 +296,20 @@ export function VirtualHandbox() {
   const gotoKey = () => {
     armOverlay();
     if (input) {jumpToInput(true); return;}
-    if (!cursor.length) {showMsg(t.hb.msgs.selectTarget); return;}
-    if (selected.onGoto) {selected.onGoto(); return;}
-    if (selected.children?.length) {setCursor([...cursor, 0]); return;}
+    if (cursor.length) {
+      if (selected.onGoto) {selected.onGoto(); return;}
+      if (selected.children?.length) {setCursor([...cursor, 0]); return;}
+    }
+    // Hors des menus (mode miroir, accueil) : GO TO re-pointe la DERNIÈRE
+    // cible définie dans l'app (écran Objets, arbre de menus…) — c'est le
+    // comportement de la raquette physique, dont GO TO pointe le dernier
+    // objet sélectionné sur son propre clavier. (v1.8.0 : la touche ne
+    // reste plus inerte hors des menus.)
+    const st = useScopeStore.getState();
+    if (st.targetRaDeg !== null && st.targetDecDeg !== null) {
+      gotoRaDecTarget(st.targetRaDeg, st.targetDecDeg, st.targetName);
+      return;
+    }
     showMsg(t.hb.msgs.selectTarget);
   };
 
@@ -443,10 +462,17 @@ export function VirtualHandbox() {
     line1 = msg.slice(0, 16);
     line2 = msg.slice(16, 32);
   } else if (mirrorActive && !hasPos) {
-    // synchro live mais pas encore de position utilisable :
-    // PAS de faux « RA 00:00:00 » — le diagnostic suit sous les pastilles
-    line1 = 'SYNCHRO LIVE';
-    line2 = hintLcd(hbHint, t).slice(0, 16);
+    // Synchro live sans AD/DEC utilisable. REPLI ALT/AZ (v1.8.0) : si
+    // l'horizontale est lue en continu (raquette muette en AD/DEC mais
+    // bavarde en :Ga#/:Gz#), le miroir l'affiche au lieu d'attendre.
+    if (altDeg !== null && azDeg !== null) {
+      line1 = `ALT ${decDegToDMS(altDeg)}`;
+      line2 = `AZ ${decDegToDMS(azDeg)}`;
+    } else {
+      // PAS de faux « RA 00:00:00 » — le diagnostic suit sous les pastilles
+      line1 = 'SYNCHRO LIVE';
+      line2 = hintLcd(hbHint, t).slice(0, 16);
+    }
   } else if (mirrorActive && hbSlewFast) {
     // Slew rapide constaté sur le matériel (GOTO ou flèche haute vitesse) :
     // le LCD de la raquette physique affiche « Slewing... » pendant ces
@@ -483,7 +509,9 @@ export function VirtualHandbox() {
   // Ligne de télémétrie sous l'écran (appui = bascule AD/DEC ↔ Alt/Az)
   // — tirets tant qu'aucune position n'a été lue sur cette liaison
   const raDecText = !hasPos
-    ? 'RA --:--:--  DEC --°--'
+    ? (altDeg !== null && azDeg !== null
+        ? `ALT ${decDegToDMS(altDeg)}  AZ ${decDegToDMS(azDeg)}`
+        : 'RA --:--:--  DEC --°--')
     : `${hbMoving ? '»' : ' '}${raDegToHMS(raDeg)}  ${decDegToDMS(decDeg)}`;
   const altAzText = altDeg !== null && azDeg !== null
     ? `ALT ${decDegToDMS(altDeg)}  AZ ${decDegToDMS(azDeg)}`

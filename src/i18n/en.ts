@@ -121,7 +121,7 @@ export const en = {
       waitPos: 'Waiting for pos…',
       lcdMute: 'Position silent',
       lcdInit: 'Not initialised',
-      errNoPos: 'Link is alive but the handbox returns no RA/DEC position. Check that the handbox is connected to the mount, that the mount is powered on, and that the handbox finished booting (main screen reached). The sync stays active: the mirror resumes with the first position.',
+      errNoPos: 'Link open but the handbox returns no position. Check: 1) the cable and serial adapter (a cheap or loosely seated cable stays silent — DTR/RTS are now asserted automatically on open), 2) the mount is connected and powered, 3) the handbox is initialised (main screen reached). Sync stays live: if ALT/AZ answers, the mirror switches to ALT/AZ; otherwise it resumes at the first position.',
       errInit: 'The handbox answers 00h00 / +00°00: initialisation or alignment not finished. Complete the alignment on the physical handbox (or "Setup › Site" in the app) — the mirror resumes automatically.',
     },
     msgs: {

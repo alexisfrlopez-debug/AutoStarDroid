@@ -146,6 +146,18 @@ class UsbSerialModule(reactContext: ReactApplicationContext) :
       val p = driver.ports[0]
       p.open(connection)
       p.setParameters(baudRate, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
+      // LIGNES DE COMMANDE : DTR et RTS doivent être ASSERTÉS — sur les
+      // adaptateurs PL2303 et CH340 (les câbles Meade les plus courants),
+      // le port ne transmet RIEN tant que DTR n'est pas levé. Sans cela la
+      // liaison entière reste muette (aucune réponse :GVP#/:Gr#…) : c'était
+      // la cause racine « LCD non synchronisé / touches invisibles / GOTO
+      // muet » en v1.7.x sur USB. Les pilotes qui ignorent ces lignes
+      // (certains FTDI câblés sans DTR) ne lèvent pas d'erreur utile —
+      // chaque appel est tolérant (try/catch) pour ne jamais bloquer l'ouverture.
+      try { p.setDTR(true) } catch (_: Exception) {}
+      try { p.setRTS(true) } catch (_: Exception) {}
+      // Purge des résidus d'une session précédente (échos, réponses orphelines).
+      try { p.purgeHwBuffers(true, true) } catch (_: Exception) {}
       port = p
       startReading()
       promise.resolve(true)
