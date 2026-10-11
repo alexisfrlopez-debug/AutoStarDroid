@@ -52,15 +52,15 @@ class ScriptTransport implements Transport {
   }
 }
 
-async function connectedClient(): Promise<{client: AutostarClient; tp: ScriptTransport}> {
+async function connectedClient(capMs = 60): Promise<{client: AutostarClient; tp: ScriptTransport}> {
   const client = new AutostarClient();
   const tp = new ScriptTransport();
   jest.spyOn(client as any, 'log').mockImplementation(() => undefined);
   // Timeouts réels trop longs pour les tests : la vraie cmd est conservée
-  // (file sérielle, parse, attentes) mais plafonnée à 60 ms.
+  // (file sérielle, parse, attentes) mais plafonnée au cap demandé.
   const orig = (client as any).cmd.bind(client);
   jest.spyOn(client as any, 'cmd').mockImplementation(
-    (c: string, ms: number, e?: RegExp) => orig(c, Math.min(ms, 60), e),
+    (c: string, ms: number, e?: RegExp) => orig(c, Math.min(ms, capMs), e),
   );
   (client as any).transport = tp;
   tp.onData((chunk) => (client as any).onData(chunk));
@@ -166,4 +166,56 @@ describe('v2.0.1 — GOTO granulaire (fini le « Connexion refusée » fourre-to
     expect(gotoErrorText('mute', x)).toBe('MUETTE');
     expect(gotoErrorText('refused', x)).toBe('REFUS');
   });
+});
+
+describe('v2.1.1 — GOTO hors raquette : ligne série réservée à la séquence', () => {
+  let client: AutostarClient;
+  let tp: ScriptTransport;
+
+  const flush = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  afterEach(async () => {
+    if (client) {try {(client as any).stopPoll();} catch (_) {} await client.disconnect().catch(() => undefined);}
+    jest.restoreAllMocks();
+    useScopeStore.getState().setConnStatus('disconnected');
+    useScopeStore.setState({hbSync: 'off' as const});
+  });
+
+  test('PAS de :ED#/:Gr# intercalés pendant la séquence GOTO (gel cmdPhase), reprise après', async () => {
+    // GOTO muet : :Sr (400 ms) + ESC ESC + sleep 350 + :Sr retry (400)
+    // ≈ 1,15 s — bien au-delà de priorityUntil (700 ms) : sans cmdPhase,
+    // le polling réinjecterait :ED# pendant la séquence.
+    ({client, tp} = await connectedClient(400));
+    useScopeStore.setState({hbSync: 'live' as const});
+    (client as any).setPollInterval(25);
+    (client as any).startPoll();
+    tp.script = [null, null, null]; // :Sr muet ×2 → statut 'mute'
+    const p = client.gotoRaDec(10, 20);
+    await flush(200);
+    expect((client as any).cmdPhase).toBe(true);
+    const during = tp.writes.filter((w) => w.startsWith(':ED')).length;
+    const r = await p;
+    expect(r).toBe('mute');
+    expect((client as any).cmdPhase).toBe(false);
+    await flush(300); // le polling reprend après la séquence
+    const after = tp.writes.filter((w) => w.startsWith(':ED')).length;
+    expect(during).toBe(0);   // gel strict pendant le GOTO
+    expect(after).toBeGreaterThan(0); // reprise normale ensuite
+  }, 15000);
+
+  test('les commandes de position (:Gr#) ne partent pas pendant syncRaDec', async () => {
+    ({client, tp} = await connectedClient(400));
+    useScopeStore.setState({hbSync: 'live' as const});
+    (client as any).setPollInterval(25);
+    (client as any).startPoll();
+    // :Sr muet (400 ms) + ESC ESC + 350 + retry ok + :Sd ok ≈ 1,2 s —
+    // au-delà de priorityUntil (700 ms) : sans cmdPhase, le poll injecterait
+    // :ED#/:Gr# au milieu de la séquence SYNC.
+    tp.script = [null, null, '1#', '1#'];
+    const ok = await client.syncRaDec(10, 20);
+    expect(ok).toBe(true);
+    expect(tp.writes.some((w) => w === ':CM#')).toBe(true);
+    expect(tp.writes.some((w) => w.startsWith(':Gr'))).toBe(false);
+    expect(tp.writes.some((w) => w.startsWith(':ED'))).toBe(false);
+  }, 15000);
 });

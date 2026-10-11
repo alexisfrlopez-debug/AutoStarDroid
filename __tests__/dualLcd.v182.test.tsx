@@ -98,7 +98,7 @@ describe('v1.8.2 — double affichage LCD (miroir + AD/DEC permanent)', () => {
     expect(uncaught).toEqual([]);
   });
 
-  test('AD/DEC permanent même hors connexion (miroir = accueil menu local)', async () => {
+  test('AD/DEC permanent même hors connexion (miroir = écran neutre v2.1.1)', async () => {
     await mount();
     act(() => {
       const s = useScopeStore.getState();
@@ -114,8 +114,8 @@ describe('v1.8.2 — double affichage LCD (miroir + AD/DEC permanent)', () => {
     expect(lcds.length).toBe(2);
     expect(String(lcds[1].props.line1)).toMatch(/^RA \d/);
     expect(String(lcds[1].props.line2)).toMatch(/^DEC/);
-    // hors ligne : le miroir montre l'accueil des menus locaux
-    expect(String(lcds[0].props.line1)).toContain('Select Item');
+    // hors ligne : écran NEUTRE — aucun menu simulé (v2.1.1)
+    expect(String(lcds[0].props.line1)).toContain('MIROIR LCD OFF');
     expect(uncaught).toEqual([]);
   });
 

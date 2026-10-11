@@ -6,7 +6,7 @@ import type {ConnectOptions, Transport, TransportType} from '../connection/types
 import {TransportError} from '../connection/types';
 import {TcpTransport} from '../connection/tcp';
 import {BluetoothTransport} from '../connection/bluetooth';
-import {UsbTransport} from '../connection/usb';
+import {UsbTransport, UsbSerialNative} from '../connection/usb';
 import {DemoTransport, setDemoSite} from '../connection/demo';
 import {SPEED_CMDS} from './profiles';
 import {proto} from '../astro/time';
@@ -189,6 +189,23 @@ export class AutostarClient {
   /** Jusqu'à quand les commandes UTILISATEUR passent avant le polling
    *  (les ticks de poll sont sautés juste après une action utilisateur). */
   private priorityUntil = 0;
+  /** Phase de COMMANDES CRITIQUES en cours (séquence :Sr/:Sd/:MS d'un GOTO,
+   *  SYNC…) : le polling est suspendu pendant ce temps pour laisser la
+   *  ligne série À LA SÉQUENCE — les raquettes #49x ont un tampon UART
+   *  minuscule et beaucoup deviennent muettes pendant un moteur : chaque
+   *  :ED#/:Gr# intercalé ajoute des délais d'expiration qui font échouer le
+   *  GOTO lancé depuis l'app (alors qu'un GOTO déclenché sur la raquette
+   *  physique, sans trafic concurrent, passe). (v2.1.1) */
+  private cmdPhase = false;
+  /** Dernière connexion USB réussie — pour la RECONNEXION AUTOMATIQUE quand
+   *  l'adaptateur est détaché puis re-énuméré (glitch de bus pendant un
+   *  slew GOTO : appel de courant moteur). (v2.1.1) */
+  private lastUsb: {
+    opts: ConnectOptions; model: ScopeModelId;
+    vid: number | null; pid: number | null;
+  } | null = null;
+  private usbReconnectTimer: number | null = null;
+  private usbReconnectTries = 0;
   /** Dernier cycle où la position bougeait (tolérance : beaucoup de raquettes
    *  ne répondent pas au port série pendant un moteur). */
   private lastMovedFlag = false;
@@ -229,6 +246,17 @@ export class AutostarClient {
       throw e;
     }
     this.transport = transport;
+    if (type === 'usb') {
+      // Mémorise l'identité du périphérique (VID/PID) pour la reconnexion
+      // automatique : un glitch de bus re-énumère l'adaptateur SOUS UN AUTRE
+      // deviceName — seule l'identité VID/PID permet de le retrouver.
+      const want = opts.usb;
+      const devs = await UsbSerialNative.listDevices().catch(() => []);
+      const info = want ? devs.find((d) => d.deviceName === want.deviceName) : undefined;
+      this.lastUsb = {opts, model, vid: info?.vendorId ?? null, pid: info?.productId ?? null};
+    } else {
+      this.lastUsb = null;
+    }
     if (transport.type !== 'demo') {
       // ESC ESC SYSTÉMATIQUE (sauf démo) : bascule les Autostar #49x en mode
       // PC série. Le besoin dépend du MATÉRIEL réel, pas du modèle choisi —
@@ -281,6 +309,7 @@ export class AutostarClient {
   }
 
   async disconnect(): Promise<void> {
+    this.cancelUsbReconnect(); // déconnexion manuelle : pas de reconnexion auto
     this.stopPoll();
     if (this.pending) {
       clearTimeout(this.pending.timer);
@@ -334,6 +363,67 @@ export class AutostarClient {
     s.setHbHint('none');
     s.pushLog('error', 'Liaison perdue — reconnectez la raquette');
     handboxSync.reset();
+    // USB : le câble peut avoir « sauté » pour un glitch de bus (slew GOTO)
+    // et être déjà re-énuméré — on tente de le retrouver tout seul. (v2.1.1)
+    this.scheduleUsbReconnect();
+  }
+
+  /* ---------- reconnexion USB automatique (v2.1.1) ---------- */
+
+  /** Programme un essai de reconnexion USB (premier essai après 2,5 s —
+   *  laisse le temps à une re-énumération de se terminer). */
+  private scheduleUsbReconnect() {
+    if (!this.lastUsb) return; // jamais connecté en USB : rien à retenter
+    if (this.usbReconnectTimer !== null) return; // déjà programmé
+    this.usbReconnectTimer = setTimeout(() => {
+      this.usbReconnectTimer = null;
+      this.tryUsbReconnect().catch(() => undefined);
+    }, 2500) as unknown as number;
+  }
+
+  private cancelUsbReconnect() {
+    if (this.usbReconnectTimer !== null) {
+      clearTimeout(this.usbReconnectTimer);
+      this.usbReconnectTimer = null;
+    }
+    this.usbReconnectTries = 0;
+  }
+
+  /** Tente de retrouver l'adaptateur USB (par VID/PID d'abord — le
+   *  deviceName change après une re-énumération — puis par nom) et
+   *  rétablit la liaison sans action utilisateur. 4 essais espacés. */
+  private async tryUsbReconnect(): Promise<void> {
+    const last = this.lastUsb;
+    if (!last) return;
+    const s = useScopeStore.getState();
+    if (s.connStatus === 'connected' || s.connStatus === 'connecting') return; // déjà rétabli (manuel ?)
+    if (this.usbReconnectTries >= 4) {
+      s.pushLog('info', 'USB : reconnexion automatique abandonnée — reconnectez dans l\'onglet Connexion');
+      return;
+    }
+    this.usbReconnectTries += 1;
+    const devs = await UsbSerialNative.listDevices().catch(() => []);
+    const dev = devs.find((d) => last.vid !== null && last.pid !== null &&
+        d.vendorId === last.vid && d.productId === last.pid) ??
+      devs.find((d) => d.deviceName === last.opts.usb?.deviceName);
+    if (!dev) {
+      s.pushLog('info', `USB : adaptateur introuvable (essai ${this.usbReconnectTries}/4) — nouvelle tentative…`);
+      this.scheduleUsbReconnect();
+      return;
+    }
+    s.pushLog('info', 'USB : adaptateur retrouvé — reconnexion automatique…');
+    // permission : sans effet (et sans boîte de dialogue) si déjà accordée
+    await UsbSerialNative.requestPermission(dev.deviceName).catch(() => false);
+    const tries = this.usbReconnectTries; // disconnect() (dans connect) remet le compteur à zéro
+    try {
+      await this.connect('usb', last.opts, last.model);
+      this.usbReconnectTries = 0;
+      s.pushLog('info', 'USB : liaison rétablie automatiquement — synchro relancée');
+    } catch (e) {
+      this.usbReconnectTries = tries; // restaure le compteur : les échecs ne bouclent pas à l'infini
+      s.pushLog('error', `USB : reconnexion automatique échouée (${(e as Error).message})`);
+      this.scheduleUsbReconnect();
+    }
   }
 
   /* ---------- couche basse ---------- */
@@ -595,6 +685,21 @@ export class AutostarClient {
    *  (barre "|" pendant le moteur, chaîne vide à l'arrivée — spec Autostar). */
   async gotoRaDec(raDeg: number, decDeg: number): Promise<GotoStatus> {
     this.bump();
+    // PHASE CRITIQUE (v2.1.1) : le polling (:ED#/:Gr#/:Gd#) est suspendu
+    // pendant toute la séquence — un GOTO lancé depuis l'app doit avoir la
+    // ligne série pour lui seul, sinon les expirations des commandes de poll
+    // intercalées le font échouer (un GOTO déclenché SUR la raquette
+    // physique, sans trafic concurrent, passait toujours).
+    this.cmdPhase = true;
+    try {
+      return await this.gotoRaDecInner(raDeg, decDeg);
+    } finally {
+      this.cmdPhase = false;
+    }
+  }
+
+  private async gotoRaDecInner(raDeg: number, decDeg: number): Promise<GotoStatus> {
+    this.bump();
     const r1 = await this.setTargetBit(':Sr', [proto.raCmd(raDeg), proto.raCmdLow(raDeg)]);
     if (r1 !== '1') {
       this.log('error', `GO TO : AD refusée par la raquette (${
@@ -671,6 +776,16 @@ export class AutostarClient {
    * mutisme — la même robustesse que le GOTO v2.0.1 s'applique).
    */
   async syncRaDec(raDeg: number, decDeg: number): Promise<boolean> {
+    this.bump();
+    this.cmdPhase = true; // même réservation de la ligne série que le GOTO
+    try {
+      return await this.syncRaDecInner(raDeg, decDeg);
+    } finally {
+      this.cmdPhase = false;
+    }
+  }
+
+  private async syncRaDecInner(raDeg: number, decDeg: number): Promise<boolean> {
     this.bump();
     const r1 = await this.setTargetBit(':Sr', [proto.raCmd(raDeg), proto.raCmdLow(raDeg)]);
     if (r1 !== '1') {
@@ -785,6 +900,9 @@ export class AutostarClient {
       // si le cycle précédent n'est pas terminé (raquette lente/muette), on
       // saute ce tick : aucune commande ne s'empile dans la file série
       if (this.pollBusy || !this.isConnected()) return;
+      // PHASE DE COMMANDES CRITIQUES (GOTO/SYNC, v2.1.1) : la ligne série
+      // est réservée à la séquence :Sr/:Sd/:MS — aucun :ED#/:Gr# intercalé
+      if (this.cmdPhase) return;
       // priorité aux commandes utilisateur : on laisse la main un instant
       if (Date.now() < this.priorityUntil) return;
       this.pollBusy = true;

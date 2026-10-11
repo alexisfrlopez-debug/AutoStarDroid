@@ -19,6 +19,20 @@ import com.hoho.android.usbserial.driver.UsbSerialProber
  * Supporte les câbles USB-série courants utilisés avec les raquettes Meade :
  * FTDI (0403), Prolific PL2303 (067b), SiLabs CP210x (10c4), WCH CH340 (1a86).
  * Lib : usb-serial-for-android (mik3y), via JitPack.
+ *
+ * RÉSILIENCE BUS USB (v2.1.1) : pendant un slew GOTO les moteurs tirent un
+ * courant important — sur une chaîne OTG alimentée par le téléphone, la chute
+ * de tension qui en résulte fait parfois ÉCHOUER un transfert bulk (IOException
+ * sur read). Avant v2.1.1, la moindre IOException TUAIT le thread de lecture
+ * (`break` définitif) : le port restait ouvert, l'app affichait « Connecté »,
+ * mais plus AUCUNE donnée n'arrivait jamais — l'utilisateur voyait la
+ * connexion « perdue » au moment du GOTO. Désormais :
+ *  - IOException sur read → on vérifie que le périphérique est toujours là
+ *    (même deviceName, ou même VID/PID après re-énumération) → si oui, on
+ *    ROUVRE le port (jusqu'à 8 essais espacés de 500 ms) et on continue ;
+ *  - périphérique réellement parti → événement usbDetached explicite (le
+ *    broadcast système peut ne jamais arriver après une re-énumération ratée),
+ *    et la couche JS peut alors tenter la reconnexion automatique.
  */
 class UsbSerialModule(reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
@@ -30,9 +44,22 @@ class UsbSerialModule(reactContext: ReactApplicationContext) :
         0x0403 to "FTDI", 0x067B to "Prolific PL", 0x10C4 to "Silabs CP210x",
         0x1A86 to "WCH CH34x", 0x1546 to "U-Blox", 0x2341 to "Arduino", 0x1567 to "Meade"
     )
+    /** Tentatives de réouverture du port après une erreur de bus. */
+    private const val REOPEN_TRIES = 8
+    /** Délai entre deux essais de réouverture (ms) — la re-énumération USB
+     *  d'un adaptateur après un glitch de bus prend typiquement 0,5 à 3 s. */
+    private const val REOPEN_DELAY_MS = 500L
   }
 
   private var port: UsbSerialPort? = null
+  /** Périphérique actuellement ouvert (pour la réouverture après glitch). */
+  private var portDevice: UsbDevice? = null
+  private var portBaud: Int = 9600
+  /** Verrou unique : open/close/réouverture ne doivent jamais se chevaucher
+   *  (le port usb-serial-for-android n'est pas thread-safe). Les writes
+   *  restent hors verrou : en cas de réouverture en cours ils échouent vite
+   *  (« Port fermé ») plutôt que de bloquer la file série côté JS. */
+  private val portLock = Any()
   private var readThread: Thread? = null
   private var reading = false
 
@@ -53,8 +80,7 @@ class UsbSerialModule(reactContext: ReactApplicationContext) :
         if (dev != null && port != null) {
           // câble débranché : fermeture propre
           stopReading()
-          try { port?.close() } catch (_: Exception) {}
-          port = null
+          closePortLocked()
           sendEvent("usbDetached", Arguments.createMap().apply { putString("deviceName", dev.deviceName) })
         }
       }
@@ -79,8 +105,7 @@ class UsbSerialModule(reactContext: ReactApplicationContext) :
 
   override fun onCatalystInstanceDestroy() {
     stopReading()
-    try { port?.close() } catch (_: Exception) {}
-    port = null
+    closePortLocked()
     try { reactApplicationContext.unregisterReceiver(usbReceiver) } catch (_: Exception) {}
   }
 
@@ -131,34 +156,66 @@ class UsbSerialModule(reactContext: ReactApplicationContext) :
     }
   }
 
+  /** Ouvre le port pour le périphérique donné (verrou portLock posé par
+   *  l'appelant). Lève en cas d'échec — l'appelant décide du rejet. */
+  private fun openPortLocked(manager: UsbManager, dev: UsbDevice, baudRate: Int) {
+    val driver = UsbSerialProber.getDefaultProber().findAllDrivers(manager)
+        .firstOrNull { it.device.deviceName == dev.deviceName }
+        ?: throw IllegalArgumentException("Driver non trouvé pour ${dev.deviceName}")
+    val connection = manager.openDevice(driver.device)
+        ?: throw IllegalStateException("Permission USB refusée ou appareil indisponible")
+    val p = driver.ports[0]
+    p.open(connection)
+    p.setParameters(baudRate, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
+    // LIGNES DE COMMANDE : DTR et RTS doivent être ASSERTÉS — sur les
+    // adaptateurs PL2303 et CH340 (les câbles Meade les plus courants),
+    // le port ne transmet RIEN tant que DTR n'est pas levé. Sans cela la
+    // liaison entière reste muette (aucune réponse :GVP#/:Gr#…) : c'était
+    // la cause racine « LCD non synchronisé / touches invisibles / GOTO
+    // muet » en v1.7.x sur USB. Les pilotes qui ignorent ces lignes
+    // (certains FTDI câblés sans DTR) ne lèvent pas d'erreur utile —
+    // chaque appel est tolérant (try/catch) pour ne jamais bloquer l'ouverture.
+    try { p.setDTR(true) } catch (_: Exception) {}
+    try { p.setRTS(true) } catch (_: Exception) {}
+    // Purge des résidus d'une session précédente (échos, réponses orphelines).
+    try { p.purgeHwBuffers(true, true) } catch (_: Exception) {}
+    port = p
+    portDevice = dev
+    portBaud = baudRate
+  }
+
+  /** Fermeture propre du port courant (verrou portLock posé par l'appelant). */
+  private fun closePortLocked() {
+    try { port?.close() } catch (_: Exception) {}
+    port = null
+    portDevice = null
+  }
+
+  /** Le périphérique est-il encore branché ? Recherche par deviceName PUIS
+   *  par VID/PID (un glitch de bus peut re-énumérer l'adaptateur sous un
+   *  autre deviceName — même identité matérielle). */
+  private fun findReattachedDevice(manager: UsbManager): UsbDevice? {
+    val wanted = portDevice ?: return null
+    return manager.deviceList.values.firstOrNull { it.deviceName == wanted.deviceName }
+        ?: manager.deviceList.values.firstOrNull {
+          it.vendorId == wanted.vendorId && it.productId == wanted.productId
+        }
+  }
+
   @ReactMethod
   fun open(deviceName: String, baudRate: Int, promise: Promise) {
     try {
-      if (port != null) {
-        stopReading(); try { port?.close() } catch (_: Exception) {}; port = null
+      synchronized(portLock) {
+        if (port != null) {
+          stopReading()
+          closePortLocked()
+        }
+        val manager = usbManager
+            ?: throw IllegalStateException("UsbManager indisponible")
+        val dev = manager.deviceList.values.firstOrNull { it.deviceName == deviceName }
+            ?: throw IllegalArgumentException("Périphérique non trouvé : $deviceName")
+        openPortLocked(manager, dev, baudRate)
       }
-      val manager = usbManager ?: return promise.reject("USB", "UsbManager indisponible")
-      val driver = UsbSerialProber.getDefaultProber().findAllDrivers(manager)
-          .firstOrNull { it.device.deviceName == deviceName }
-          ?: return promise.reject("USB", "Driver non trouvé pour $deviceName")
-      val connection = manager.openDevice(driver.device)
-          ?: return promise.reject("USB", "Permission USB refusée ou appareil indisponible")
-      val p = driver.ports[0]
-      p.open(connection)
-      p.setParameters(baudRate, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
-      // LIGNES DE COMMANDE : DTR et RTS doivent être ASSERTÉS — sur les
-      // adaptateurs PL2303 et CH340 (les câbles Meade les plus courants),
-      // le port ne transmet RIEN tant que DTR n'est pas levé. Sans cela la
-      // liaison entière reste muette (aucune réponse :GVP#/:Gr#…) : c'était
-      // la cause racine « LCD non synchronisé / touches invisibles / GOTO
-      // muet » en v1.7.x sur USB. Les pilotes qui ignorent ces lignes
-      // (certains FTDI câblés sans DTR) ne lèvent pas d'erreur utile —
-      // chaque appel est tolérant (try/catch) pour ne jamais bloquer l'ouverture.
-      try { p.setDTR(true) } catch (_: Exception) {}
-      try { p.setRTS(true) } catch (_: Exception) {}
-      // Purge des résidus d'une session précédente (échos, réponses orphelines).
-      try { p.purgeHwBuffers(true, true) } catch (_: Exception) {}
-      port = p
       startReading()
       promise.resolve(true)
     } catch (e: Exception) {
@@ -170,8 +227,7 @@ class UsbSerialModule(reactContext: ReactApplicationContext) :
   fun close(promise: Promise) {
     try {
       stopReading()
-      port?.close()
-      port = null
+      synchronized(portLock) { closePortLocked() }
       promise.resolve(true)
     } catch (e: Exception) {
       promise.reject("CLOSE", e.message, e)
@@ -214,8 +270,56 @@ class UsbSerialModule(reactContext: ReactApplicationContext) :
             sendEvent("usbData", Arguments.createMap().apply { putString("data", chunk) })
           }
         } catch (e: java.io.IOException) {
-          sendEvent("usbError", Arguments.createMap().apply { putString("message", e.message) })
-          break
+          // RÉSILIENCE v2.1.1 : une IOException sur read est souvent
+          // TRANSITOIRE (slew moteur → chute de tension OTG → transfert bulk
+          // raté, ou re-énumération de l'adaptateur). Tuer le thread ici
+          // laissait une liaison « zombie » : connecté côté app, muet pour
+          // toujours. Tant que le périphérique est encore branché, on
+          // ROUVRE le port et on poursuit la lecture.
+          if (!reading) break
+          val manager = usbManager
+          var reopened = false
+          if (manager != null) {
+            repeat(REOPEN_TRIES) {
+              if (!reading) return@repeat
+              try { Thread.sleep(REOPEN_DELAY_MS) } catch (_: InterruptedException) { return@repeat }
+              if (!reading) return@repeat
+              val ok = try {
+                synchronized(portLock) {
+                  val dev = findReattachedDevice(manager)
+                  if (dev == null) {
+                    false // périphérique introuvable (cette passe)
+                  } else {
+                    try { port?.close() } catch (_: Exception) {}
+                    port = null
+                    try {
+                      openPortLocked(manager, dev, portBaud)
+                      true
+                    } catch (_: Exception) {
+                      false
+                    }
+                  }
+                }
+              } catch (_: Exception) { false }
+              if (ok) { reopened = true }
+              if (reopened) return@repeat
+            }
+          }
+          if (!reading) break
+          if (reopened) {
+            sendEvent("usbError", Arguments.createMap().apply {
+              putString("message", "USB : erreur de bus — port rouvert automatiquement, liaison conservée")
+            })
+          } else {
+            // périphérique vraiment parti (ou irrécupérable) : événement
+            // explicite — le broadcast système DETACHED peut ne jamais
+            // arriver après une re-énumération ratée, et la couche JS en
+            // dépend pour remettre son état et retenter la connexion.
+            val name = portDevice?.deviceName ?: ""
+            synchronized(portLock) { closePortLocked() }
+            sendEvent("usbDetached", Arguments.createMap().apply { putString("deviceName", name) })
+            break
+          }
         } catch (e: Exception) {
           if (reading) sendEvent("usbError", Arguments.createMap().apply { putString("message", e.message) })
         }

@@ -511,15 +511,22 @@ export function VirtualHandbox() {
   };
 
   /* ---------- ÉCRAN MIROIR (LCD de gauche) ---------- */
-  // Hiérarchie : message → miroir :ED# frais → navigation des menus locaux →
+  // Hiérarchie : message → miroir :ED# frais → aperçu menus locaux (5 s) →
   // « Slewing... » → dernier dump :ED# tenu (creux de poll) → repli ALT/AZ →
-  // écran d'attente → accueil menu local. L'AD/DEC n'apparaît PLUS ici
-  // (v1.8.2) : il a son affichage permanent à droite — plus d'alternance.
+  // écran d'attente → écran NEUTRE (v2.1.1 : plus JAMAIS de menu simulé au
+  // repos — le faux « Select Item » hors synchro portait à confusion).
+  // L'AD/DEC n'apparaît PLUS ici (v1.8.2) : il a son affichage permanent à
+  // droite — plus d'alternance.
   const mirrorBase = connected && hbSync === 'live';
   const mirrorActive = mirrorBase && !msg && !overlay;
-  // Navigation locale active = l'utilisateur manipule les menus de l'app
-  // (hors miroir :ED# frais : sinon les touches partent sur la raquette).
-  const localNav = !lcdFresh && (overlay || cursor.length > 0 || input.length > 0);
+  // Navigation locale ACTIVE uniquement (v2.1.1) : aperçu des menus de l'app
+  // pendant l'interaction (touche < 5 s, saisie en cours) — hors miroir :ED#
+  // frais, sinon les touches partent sur la raquette. FINI l'accueil de menu
+  // simulé AFFICHÉ EN PERMANENCE : au repos, le LCD montre un écran neutre
+  // (voir repli plus bas) au lieu d'un faux « Select Item » qui imitait la
+  // raquette physique sans être synchronisé avec elle — source de confusion
+  // signalée par l'utilisateur.
+  const localNav = !lcdFresh && (overlay || input.length > 0);
   // directions constatées SUR LE MATÉRIEL (croix virtuelle allumée en retour)
   const NO_DIR: Record<Dir, boolean> = {n: false, s: false, e: false, w: false};
   const phys: Record<Dir, boolean> = connected && hbExternal ? (hbDirs ?? NO_DIR) : NO_DIR;
@@ -528,10 +535,6 @@ export function VirtualHandbox() {
   };
   const dirGlyph = (d: Dir) => ({n: '▲', s: '▼', e: '▶', w: '◀'} as Record<Dir, string>)[d];
   const physGlyphs = (['n', 's', 'e', 'w'] as Dir[]).filter((d) => litDirs[d]).map(dirGlyph).join('');
-  const menuHome = () => {
-    line1 = 'Select Item';
-    line2 = '> ' + (root.children?.[0]?.line1 ?? '');
-  };
   let line1: string = '';
   let line2: string = '';
   if (msg) {
@@ -544,10 +547,11 @@ export function VirtualHandbox() {
     line1 = lcdLine1 as string;
     line2 = lcdLine2 as string;
   } else if (localNav) {
-    // Aperçu des menus locaux (navigation hors miroir frais) — le LCD suit
-    // MODE/ENTER/▲▼/chiffres comme l'écran de la raquette.
+    // Aperçu TEMPORAIRE des menus locaux pendant la navigation — le LCD suit
+    // MODE/ENTER/▲▼/chiffres, puis rend la main après 5 s sans touche.
     if (!cursor.length) {
-      menuHome();
+      line1 = 'Select Item';
+      line2 = '> ' + (root.children?.[0]?.line1 ?? '');
     } else {
       line1 = parent.line1.slice(0, 16);
       line2 = '> ' + (input ? input + '_' : (selected.line1 ?? ''));
@@ -576,8 +580,13 @@ export function VirtualHandbox() {
     line1 = 'SYNCHRO LIVE';
     line2 = hintLcd(hbHint, t).slice(0, 16);
   } else {
-    // Hors ligne / synchro coupée : accueil des menus locaux.
-    menuHome();
+    // Hors ligne / synchro coupée, au repos (v2.1.1) : écran NEUTRE — aucun
+    // menu simulé. Le miroir LCD n'est pas actif : afficher un faux menu
+    // « Select Item » ressemblant à celui de la raquette (sans l'être)
+    // portait à confusion ; le vrai écran de la raquette reviendra seul dès
+    // que la synchro live fournira un dump :ED# frais.
+    line1 = t.hb.sync.mirrorOff1;
+    line2 = connected ? t.hb.sync.mirrorOff2Sync : t.hb.sync.mirrorOff2Offline;
   }
 
   /* ---------- AD/DEC PERMANENT (LCD de droite, v1.8.2) ---------- */

@@ -419,3 +419,31 @@ export function parseDecDms(s: string): number | null {
   if (d > 89 || mi > 59 || sec >= 60) return null;
   return sign * (d + mi / 60 + sec / 3600);
 }
+
+/* ------------------------------------------------------------------ */
+/* Position Home (v2.1.1) — ancrage mécanique répétible                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Géométrie théorique de la position Home d'une monture Meade, selon le
+ * mode d'alignement courant et l'hémisphère du site :
+ *  - POLAIRE : le tube est pointé vers le pôle céleste → hauteur = |latitude|,
+ *    azimut 0° (hémisphère nord) ou 180° (hémisphère austral) ;
+ *  - ALT-AZ (défaut, et mode « Terrestre ») : position de départ de
+ *    l'alignement facile Meade — tube HORIZONTAL vers le nord (austral :
+ *    le sud) → hauteur 0°, azimut 0°/180°.
+ *
+ * Cette direction ciel est connue SANS centrer d'étoile : enregistrée avec
+ * la télémétrie du téléphone au même instant, elle donne un point
+ * d'alignement immédiat. Le biais magnétique (déclinaison, distorsion
+ * locale) est absorbé par la matrice W du recalage — c'est son rôle.
+ */
+export function homeGeometry(
+  alignMode: 'altaz' | 'polar' | 'land' | 'unknown',
+  latDeg: number,
+): {polar: boolean; altDeg: number; azDeg: number} {
+  const polar = alignMode === 'polar';
+  const azDeg = latDeg >= 0 ? 0 : 180;
+  const altDeg = polar ? Math.abs(latDeg) : 0;
+  return {polar, altDeg, azDeg};
+}

@@ -29,11 +29,17 @@ export interface TelemetryPoint {
   quat: Quat;
   /** Horodatage (ms epoch). */
   ts: number;
+  /** Point « Position Home » (v2.1.1) : ancrage mécanique répétible —
+   *  un NOUVEAU point Home REMPLACE l'ancien (une seule référence home,
+   *  toujours la plus récente : le téléphone est remonté à chaque session). */
+  home?: boolean;
 }
 
 interface TelemetryState {
   points: TelemetryPoint[];
   addPoint: (p: Omit<TelemetryPoint, 'id' | 'ts'>) => void;
+  /** Enregistre (ou remplace) le point « Position Home » (v2.1.1). */
+  setHomePoint: (p: Omit<TelemetryPoint, 'id' | 'ts'>) => void;
   removePoint: (id: string) => void;
   clearPoints: () => void;
 }
@@ -49,6 +55,21 @@ export const useTelemetryStore = create<TelemetryState>()(
           points: [
             ...s.points.slice(-(MAX_POINTS - 1)),
             {...p, id: `T${Date.now()}${Math.floor(Math.random() * 1e4)}`, ts: Date.now()},
+          ],
+        })),
+      /** Point Home : UNIQUE référence — l'ancien est retiré (la position
+       *  Home est revalidée à chaque session, l'ancien point serait périmé
+       *  si le téléphone a été remonté différemment sur le tube). */
+      setHomePoint: (p) =>
+        set((s) => ({
+          points: [
+            ...s.points.filter((x) => !x.home).slice(-(MAX_POINTS - 1)),
+            {
+              ...p,
+              home: true,
+              id: `H${Date.now()}${Math.floor(Math.random() * 1e4)}`,
+              ts: Date.now(),
+            },
           ],
         })),
       removePoint: (id) => set((s) => ({points: s.points.filter((p) => p.id !== id)})),

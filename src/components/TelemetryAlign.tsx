@@ -13,6 +13,14 @@
  *     avec la position crue par la raquette ;
  *  5. option : la validation met aussi à jour l'alignement interne de la
  *     raquette (:Sr/:Sd puis :CM#).
+ *
+ * POSITION HOME (v2.1.1) : bouton d'ANCRAGE MÉCANIQUE — tube placé dans sa
+ * position Home connue et répétible (polaire : vers le pôle ; Alt-Az :
+ * horizontal vers le nord/sud), un appui enregistre la télémétrie du
+ * téléphone avec la direction ciel THÉORIQUE de cette position : un point
+ * d'alignement immédiat qui affine le recalage, sans centrer d'étoile. Un
+ * nouveau point Home remplace l'ancien (une seule référence, la plus
+ * récente — le téléphone est remonté à chaque session).
  */
 import {useEffect, useMemo, useRef, useState} from 'react';
 import {View, Text, TouchableOpacity, Alert} from 'react-native';
@@ -28,6 +36,7 @@ import {useTrackingStore} from '../store/trackingStore';
 import {
   applyFit,
   averageQuat,
+  homeGeometry,
   parseRaHms,
   parseDecDms,
   type Quat,
@@ -50,8 +59,10 @@ export function TelemetryAlign() {
   const scopeRa = useScopeStore((st) => st.raDeg);
   const scopeDec = useScopeStore((st) => st.decDeg);
   const hasPos = useScopeStore((st) => st.hasPos);
+  const alignMode = useScopeStore((st) => st.alignMode);
   const points = useTelemetryStore((st) => st.points);
   const addPoint = useTelemetryStore((st) => st.addPoint);
+  const setHomePoint = useTelemetryStore((st) => st.setHomePoint);
   const removePoint = useTelemetryStore((st) => st.removePoint);
   const clearPoints = useTelemetryStore((st) => st.clearPoints);
 
@@ -213,6 +224,37 @@ export function TelemetryAlign() {
     }
   };
 
+  /* ---------- POSITION HOME (v2.1.1) : ancrage mécanique ---------- */
+  /** Géométrie selon le mode d'alignement courant (cf. homeGeometry). */
+  const homeGeo = useMemo(
+    () => homeGeometry(alignMode, site.latDeg),
+    [alignMode, site.latDeg],
+  );
+
+  const homePoint = points.find((p) => p.home) ?? null;
+
+  const validateHome = () => {
+    if (!hasQuat) {
+      Alert.alert(t.common.error, t.align.telem.needSamples);
+      return;
+    }
+    const q = averageQuat(samples.current);
+    if (!q) {
+      Alert.alert(t.common.error, t.align.telem.needSamples);
+      return;
+    }
+    const rd = altAzToRaDec(homeGeo.altDeg, homeGeo.azDeg, site.latDeg, site.lonDeg, new Date());
+    setHomePoint({
+      name: t.align.home.name,
+      raDeg: rd.raDeg,
+      decDeg: rd.decDeg,
+      altDeg: homeGeo.altDeg,
+      azDeg: homeGeo.azDeg,
+      quat: q,
+    });
+    Alert.alert(t.common.success, t.align.home.done);
+  };
+
   const acc = orient?.accuracy ?? 0;
   const rmsArcmin = fit ? fit.rmsDeg * 60 : null;
 
@@ -277,6 +319,43 @@ export function TelemetryAlign() {
             ) : null}
           </>
         ) : null}
+      </View>
+
+      {/* ——— POSITION HOME : ancrage mécanique répétible (v2.1.1) ——— */}
+      <View
+        style={{
+          backgroundColor: c.bgPanel2,
+          borderRadius: 10,
+          borderWidth: 1,
+          borderColor: c.border,
+          padding: 10,
+          marginTop: 12,
+        }}>
+        <Text style={{color: c.text, fontSize: 13, fontWeight: '700'}}>
+          ⌂ {t.align.home.title}
+        </Text>
+        <Text style={{color: c.textDim, fontSize: 12, lineHeight: 17, marginTop: 3}}>
+          {t.align.home.intro}
+        </Text>
+        <Text style={{color: c.textFaint, fontSize: 11.5, lineHeight: 16, marginTop: 4}}>
+          {homeGeo.polar
+            ? t.align.home.polarGeo.replace('{alt}', homeGeo.altDeg.toFixed(1)).replace('{az}', String(homeGeo.azDeg))
+            : t.align.home.altazGeo.replace('{az}', String(homeGeo.azDeg))}
+        </Text>
+        <Btn
+          label={t.align.home.btn}
+          variant="primary"
+          disabled={!hasQuat}
+          onPress={validateHome}
+          style={{marginTop: 8}}
+        />
+        <Text style={{color: homePoint ? c.green : c.textFaint, fontSize: 11.5, marginTop: 6}}>
+          {homePoint
+            ? `● ${t.align.home.current} — ${homeGeo.polar
+                ? t.align.home.polarGeo.replace('{alt}', homeGeo.altDeg.toFixed(1)).replace('{az}', String(homeGeo.azDeg))
+                : t.align.home.altazGeo.replace('{az}', String(homeGeo.azDeg))}`
+            : t.align.home.none}
+        </Text>
       </View>
 
       {/* Choix de l'objet */}
@@ -363,7 +442,9 @@ export function TelemetryAlign() {
       {points.map((p, i) => (
         <View key={p.id} style={[s.row, s.between, {paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: c.border}]}>
           <View style={{flex: 1, marginRight: 8}}>
-            <Text style={{color: c.text, fontSize: 13, fontWeight: '600'}}>{p.name}</Text>
+            <Text style={{color: c.text, fontSize: 13, fontWeight: '600'}}>
+              {p.home ? '⌂ ' : ''}{p.name}
+            </Text>
             <Text style={{color: c.textFaint, fontSize: 11}}>
               {raDegToHMS(p.raDeg)} {decDegToDMS(p.decDeg)}
               {fit ? ` · ${t.align.telem.residual} ${(fit.residualsDeg[i] * 60).toFixed(1)}′` : ''}
