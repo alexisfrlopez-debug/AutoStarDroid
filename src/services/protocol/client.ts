@@ -206,6 +206,13 @@ export class AutostarClient {
   } | null = null;
   private usbReconnectTimer: number | null = null;
   private usbReconnectTries = 0;
+  /** Dernière connexion Bluetooth réussie — reconnexion automatique (v2.1.2).
+   *  L'adresse BT est IMMUTABLE : le module côté télescope (HC-05, cordon
+   *  Meade BT) qui brown-out pendant un slew retrouve la liaison sans
+   *  ré-appairage — il suffit de réouvrir le socket. */
+  private lastBt: {opts: ConnectOptions; model: ScopeModelId} | null = null;
+  private btReconnectTimer: number | null = null;
+  private btReconnectTries = 0;
   /** Dernier cycle où la position bougeait (tolérance : beaucoup de raquettes
    *  ne répondent pas au port série pendant un moteur). */
   private lastMovedFlag = false;
@@ -252,10 +259,22 @@ export class AutostarClient {
       // deviceName — seule l'identité VID/PID permet de le retrouver.
       const want = opts.usb;
       const devs = await UsbSerialNative.listDevices().catch(() => []);
-      const info = want ? devs.find((d) => d.deviceName === want.deviceName) : undefined;
+      const info = want
+        ? devs.find((d) => d.deviceName === want.deviceName) ??
+          // reconnexion v2.1.2 : opts peut porter l'identité matérielle
+          // trouvée lors de la précédente re-énumération
+          (want.vendorId != null && want.productId != null
+            ? devs.find((d) => d.vendorId === want.vendorId && d.productId === want.productId)
+            : undefined)
+        : undefined;
       this.lastUsb = {opts, model, vid: info?.vendorId ?? null, pid: info?.productId ?? null};
+      this.lastBt = null;
+    } else if (type === 'bluetooth') {
+      this.lastBt = {opts, model};
+      this.lastUsb = null;
     } else {
       this.lastUsb = null;
+      this.lastBt = null;
     }
     if (transport.type !== 'demo') {
       // ESC ESC SYSTÉMATIQUE (sauf démo) : bascule les Autostar #49x en mode
@@ -275,6 +294,7 @@ export class AutostarClient {
     this.startPoll();
     handboxSync.enable(); // synchro temps réel par défaut dès la connexion
     this.detectFirmware(); // mappage du clavier auto — asynchrone, non bloquant
+    this.autoSyncScopeData(); // date/heure/site du téléphone → raquette (v2.1.2)
   }
 
   /**
@@ -310,6 +330,7 @@ export class AutostarClient {
 
   async disconnect(): Promise<void> {
     this.cancelUsbReconnect(); // déconnexion manuelle : pas de reconnexion auto
+    this.cancelBtReconnect();
     this.stopPoll();
     if (this.pending) {
       clearTimeout(this.pending.timer);
@@ -361,17 +382,31 @@ export class AutostarClient {
     s.setHbDirs(null);
     s.setHbSlewFast(false);
     s.setHbHint('none');
-    s.pushLog('error', 'Liaison perdue — reconnectez la raquette');
+    // USB ou BT déjà mémorisés → la reconnexion est AUTOMATIQUE : le message
+    // ne doit pas demander à l'utilisateur ce que l'app va faire toute seule.
+    if (this.lastUsb) {
+      s.pushLog('error', 'Liaison perdue — reconnexion automatique USB en cours…');
+    } else if (this.lastBt) {
+      s.pushLog('error', 'Liaison Bluetooth perdue — reconnexion automatique en cours…');
+    } else {
+      s.pushLog('error', 'Liaison perdue — reconnectez la raquette');
+    }
     handboxSync.reset();
     // USB : le câble peut avoir « sauté » pour un glitch de bus (slew GOTO)
     // et être déjà re-énuméré — on tente de le retrouver tout seul. (v2.1.1)
-    this.scheduleUsbReconnect();
+    // BT : le module du télescope peut avoir brown-outé — même mécanique. (v2.1.2)
+    this.scheduleReconnect();
   }
 
-  /* ---------- reconnexion USB automatique (v2.1.1) ---------- */
+  /* ---------- reconnexion USB / Bluetooth automatique (v2.1.1 / v2.1.2) ---------- */
 
-  /** Programme un essai de reconnexion USB (premier essai après 2,5 s —
-   *  laisse le temps à une re-énumération de se terminer). */
+  /** Programme un essai de reconnexion (premier essai après 2,5 s — laisse
+   *  le temps à une re-énumération USB ou à un redémarrage de module BT). */
+  private scheduleReconnect() {
+    if (this.lastUsb) this.scheduleUsbReconnect();
+    else if (this.lastBt) this.scheduleBtReconnect();
+  }
+
   private scheduleUsbReconnect() {
     if (!this.lastUsb) return; // jamais connecté en USB : rien à retenter
     if (this.usbReconnectTimer !== null) return; // déjà programmé
@@ -379,6 +414,17 @@ export class AutostarClient {
       this.usbReconnectTimer = null;
       this.tryUsbReconnect().catch(() => undefined);
     }, 2500) as unknown as number;
+  }
+
+  /** Programme un essai de reconnexion Bluetooth (4 essais espacés de 3 s —
+   *  un module HC-05 qui brown-out met 2 à 5 s à re-redémarrer). */
+  private scheduleBtReconnect() {
+    if (!this.lastBt) return;
+    if (this.btReconnectTimer !== null) return; // déjà programmé
+    this.btReconnectTimer = setTimeout(() => {
+      this.btReconnectTimer = null;
+      this.tryBtReconnect().catch(() => undefined);
+    }, 3000) as unknown as number;
   }
 
   private cancelUsbReconnect() {
@@ -389,9 +435,24 @@ export class AutostarClient {
     this.usbReconnectTries = 0;
   }
 
+  private cancelBtReconnect() {
+    if (this.btReconnectTimer !== null) {
+      clearTimeout(this.btReconnectTimer);
+      this.btReconnectTimer = null;
+    }
+    this.btReconnectTries = 0;
+  }
+
   /** Tente de retrouver l'adaptateur USB (par VID/PID d'abord — le
    *  deviceName change après une re-énumération — puis par nom) et
-   *  rétablit la liaison sans action utilisateur. 4 essais espacés. */
+   *  rétablit la liaison sans action utilisateur. 4 essais espacés.
+   *  CORRECTIF v2.1.2 (cause racine « GOTO → connexion perdue ») : la
+   *  reconnexion réouvrait l'ANCIEN deviceName alors que la re-énumération
+   *  en a généré un NOUVEAU (le numéro de périphérique USB change) —
+   *  l'ouverture échouait systématiquement (« Périphérique non trouvé »)
+   *  et la connexion semblait définitivement perdue. Désormais l'identité
+   *  matérielle retrouvée (VID/PID) fournit le deviceName COURANT, passé
+   *  à connect() dans des options clonées. */
   private async tryUsbReconnect(): Promise<void> {
     const last = this.lastUsb;
     if (!last) return;
@@ -414,15 +475,45 @@ export class AutostarClient {
     s.pushLog('info', 'USB : adaptateur retrouvé — reconnexion automatique…');
     // permission : sans effet (et sans boîte de dialogue) si déjà accordée
     await UsbSerialNative.requestPermission(dev.deviceName).catch(() => false);
+    // options clonées : deviceName COURANT de l'adaptateur retrouvé + son
+    // identité matérielle (conservée pour une future re-énumération)
+    const opts: ConnectOptions = last.opts.usb
+      ? {...last.opts, usb: {...last.opts.usb, deviceName: dev.deviceName, vendorId: dev.vendorId, productId: dev.productId}}
+      : last.opts;
     const tries = this.usbReconnectTries; // disconnect() (dans connect) remet le compteur à zéro
     try {
-      await this.connect('usb', last.opts, last.model);
+      await this.connect('usb', opts, last.model);
       this.usbReconnectTries = 0;
       s.pushLog('info', 'USB : liaison rétablie automatiquement — synchro relancée');
     } catch (e) {
       this.usbReconnectTries = tries; // restaure le compteur : les échecs ne bouclent pas à l'infini
       s.pushLog('error', `USB : reconnexion automatique échouée (${(e as Error).message})`);
       this.scheduleUsbReconnect();
+    }
+  }
+
+  /** Rétablit la liaison Bluetooth (adresse immuable) sans action
+   *  utilisateur. 4 essais espacés — couvre le brown-out du module BT côté
+   *  télescope pendant un slew (chute de tension moteur). */
+  private async tryBtReconnect(): Promise<void> {
+    const last = this.lastBt;
+    if (!last) return;
+    const s = useScopeStore.getState();
+    if (s.connStatus === 'connected' || s.connStatus === 'connecting') return;
+    if (this.btReconnectTries >= 4) {
+      s.pushLog('info', 'Bluetooth : reconnexion automatique abandonnée — reconnectez dans l\'onglet Connexion');
+      return;
+    }
+    this.btReconnectTries += 1;
+    const tries = this.btReconnectTries;
+    try {
+      await this.connect('bluetooth', last.opts, last.model);
+      this.btReconnectTries = 0;
+      s.pushLog('info', 'Bluetooth : liaison rétablie automatiquement — synchro relancée');
+    } catch (e) {
+      this.btReconnectTries = tries;
+      s.pushLog('error', `Bluetooth : reconnexion automatique échouée (${(e as Error).message})`);
+      this.scheduleBtReconnect();
     }
   }
 
@@ -595,6 +686,19 @@ export class AutostarClient {
    *  de lecture en cours. */
   private bump() {
     this.priorityUntil = Date.now() + 700;
+  }
+
+  /** La liaison est-elle « occupée » par un mouvement (app ou matériel) ?
+   *  Pendant un slew — GOTO lancé par l'app (ownMoveUntil) ou flèches — la
+   *  plupart des raquettes ne répondent plus au port série : ce n'est PAS
+   *  une panne. Toute la logique de diagnostic (compteurs d'échec, sondes,
+   *  hint « muette ») s'appuie sur ce prédicat. (v2.1.2 : ownMoveUntil inclus,
+   *  un GOTO lancé depuis l'app ne doit JAMAIS déclencher les diagnostics
+   *  « raquette muette » qui donnaient l'impression d'une connexion perdue.) */
+  private isBusyNow(): boolean {
+    const now = Date.now();
+    return this.lastMovedFlag || this.holding.size > 0 ||
+      now - this.lastExternalAt < 3000 || now < this.ownMoveUntil;
   }
 
   async stopMove(dir: Dir) {
@@ -817,8 +921,10 @@ export class AutostarClient {
 
   /** Envoie date/heure/site du téléphone vers la raquette. Les commandes
    *  :SG/:SL/:SC/:St/:Sg RÉPONDENT ("1") — la réponse est consommée (et
-   *  tolérée si muette) au lieu de rester dans le tampon série. */
-  async pushPhoneData(latDeg: number, lonDeg: number): Promise<void> {
+   *  tolérée si muette) au lieu de rester dans le tampon série.
+   *  Renvoie (v2.1.2) l'heure/date LOCALES envoyées ('HH:MM:SS' / 'MM/JJ/AA')
+   *  pour que l'appelant (sync manuelle ou auto) rafraîchisse l'affichage. */
+  async pushPhoneData(latDeg: number, lonDeg: number): Promise<{time: string; date: string}> {
     this.bump();
     const now = new Date();
     const tzOffsetMin = -now.getTimezoneOffset();
@@ -845,6 +951,47 @@ export class AutostarClient {
     await sleep(120);
     const lonMeade = lonDeg < 0 ? 360 + lonDeg : lonDeg;
     await this.cmd(`:Sg${proto.decCmd(lonMeade)}#`, 2000, VALID.bit).catch(ignore);
+    return {time: `${hh}:${mm}:${ss}`, date: `${mo}/${dd}/${yy}`};
+  }
+
+  /**
+   * MISE À JOUR AUTOMATIQUE DE LA RAQUETTE À LA CONNEXION (v2.1.2 — demande
+   * utilisateur : « une mise à jour automatique de la raquette physique
+   * (date, heure, site etc....) dès la connexion »). Dès la liaison établie :
+   *  - l'horloge du téléphone (heure locale + fuseau + date) part vers la
+   *    raquette (:SG/:SL/:SC) — plus de date d'usine faussant le suivi et
+   *    les éphémérides ;
+   *  - le SITE mémorisé dans Réglages part vers la raquette (:St/:Sg) —
+   *    les GOTO et l'alignement partent d'un site cohérent.
+   *  Réglable (défaut ACTIVÉ) dans Réglages → « Mise à jour auto ». Non
+   *  bloquant, silencieux en cas de raquette muette (les réponses sont
+   *  tolérées), journalisé. En démo, le site du démonstrateur est aligné.
+   */
+  private async autoSyncScopeData(): Promise<void> {
+    try {
+      const st = useSettingsStore.getState();
+      if (!st.autoSyncScope) return;
+      const {latDeg, lonDeg, name} = st.site;
+      const tp = this.transport;
+      if (!tp) return;
+      if (tp.type === 'demo') {
+        setDemoSite(latDeg, lonDeg);
+        return;
+      }
+      // petit délai : laisse la détection firmware (:GVP#/:GVN#) passer d'abord
+      await sleep(600);
+      if (!this.transport) return; // déconnecté entre-temps
+      const sent = await this.pushPhoneData(latDeg, lonDeg);
+      const s = useScopeStore.getState();
+      s.setScopeTime(sent.time);
+      s.setScopeDate(sent.date);
+      s.pushLog('info', `Raquette mise à jour automatiquement — date, heure et site « ${name} » envoyés`);
+    } catch (e) {
+      // tolérant : une raquette muette à la mise sous tension ne doit jamais
+      // faire échouer la connexion — l'envoi manuel reste disponible
+      useScopeStore.getState().pushLog('info',
+        `Mise à jour auto de la raquette non confirmée (${(e as Error).message}) — envoi manuel possible dans Réglages`);
+    }
   }
 
   async setTracking(mode: 'altaz' | 'polar' | 'land') {
@@ -924,7 +1071,12 @@ export class AutostarClient {
               s0.pushLog('info', 'Miroir LCD actif (:ED#) — écran de la raquette physique relu en continu');
             }
           } else {
-            this.lcdFail += 1;
+            // v2.1.2 : les échecs :ED# PENDANT un moteur (raquette muette sur
+            // la ligne série pendant un slew — y compris un GOTO lancé par
+            // l'app) ne comptent PAS dans le compteur « raquette sans :ED# » :
+            // 6 échecs en 3 s de slew effaçaient le miroir et journalisaient
+            // « miroir par télémétrie » — de quoi croire la connexion perdue.
+            if (!this.isBusyNow()) this.lcdFail += 1;
             if (this.lcdFail === 6) {
               s0.clearLcdMirror();
               s0.pushLog('info', 'Raquette sans :ED# — miroir par télémétrie (position/alt-az)');
@@ -952,9 +1104,7 @@ export class AutostarClient {
             altAzHandled = await this.readAltAzAndDetect(s, now);
           }
           if (!altAzHandled) {
-            const busy = this.lastMovedFlag || this.holding.size > 0 ||
-              now - this.lastExternalAt < 3000;
-            if (!busy) this.failCount += 1;
+            if (!this.isBusyNow()) this.failCount += 1;
             this.applyHint(s, now);
           }
         } else {
@@ -1048,6 +1198,14 @@ export class AutostarClient {
    *  EXCEPTION (v1.8.0) : si l'alt/az est lu en continu, la liaison vit et
    *  le miroir est alimenté par l'horizontale — aucun diagnostic d'attente. */
   private applyHint(s: ReturnType<typeof useScopeStore.getState>, now: number) {
+    // MOUVEMENT INITIÉ PAR L'APP (GOTO lancé depuis Objets/Alignement,
+    // impulsions du suivi télémétrique…) : le mutisme de la raquette est
+    // NORMAL et EXPLIQUÉ — aucun diagnostic « muette » ni sonde :GVP#
+    // pendant toute la fenêtre ownMoveUntil. (v2.1.2)
+    if (now < this.ownMoveUntil) {
+      s.setHbHint('none');
+      return;
+    }
     // miroir LCD frais : la liaison vit et l'écran réel est affiché —
     // aucun diagnostic (la position AD/DEC absente n'a plus d'importance)
     if (this.lcdFail === 0 && s.lcdAt > 0 && now - s.lcdAt < LCD_STALE_MS) {
@@ -1071,9 +1229,7 @@ export class AutostarClient {
       }
     }
     // sonde de liaison toutes les 10 s max (hors mouvement)
-    const busy = this.lastMovedFlag || this.holding.size > 0 ||
-      now - this.lastExternalAt < 3000;
-    if (!busy && now - this.lastProbeAt > 10000) {
+    if (!this.isBusyNow() && now - this.lastProbeAt > 10000) {
       this.lastProbeAt = now;
       this.cmd(':GVP#', 2500)
         .then((p) => {

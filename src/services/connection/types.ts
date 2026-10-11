@@ -3,7 +3,10 @@ export type TransportType = 'wifi' | 'bluetooth' | 'usb' | 'demo';
 
 export interface WifiOptions {host: string; port: number}
 export interface BluetoothOptions {address: string}
-export interface UsbOptions {deviceName: string; baud: number}
+/** Identité USB : deviceName COURANT + identité matérielle (VID/PID).
+ *  VID/PID servent à retrouver l'adaptateur après une re-énumération
+ *  (glitch de bus pendant un slew GOTO) — le deviceName change alors. */
+export interface UsbOptions {deviceName: string; baud: number; vendorId?: number; productId?: number}
 
 export interface ConnectOptions {
   wifi?: WifiOptions;

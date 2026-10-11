@@ -27,6 +27,9 @@ interface SettingsState {
   onlyAboveHorizon: boolean;
   /** Déclinaison magnétique du site (Est positif, ex. +2° en France). */
   declinationDeg: number;
+  /** Mise à jour AUTOMATIQUE de la raquette physique à chaque connexion
+   *  (date, heure, fuseau, site depuis les réglages du téléphone). */
+  autoSyncScope: boolean;
   setLanguage: (l: Lang) => void;
   setNightVision: (v: boolean) => void;
   setKeySounds: (v: boolean) => void;
@@ -38,6 +41,7 @@ interface SettingsState {
   setLastUsbDevice: (d: string) => void;
   setOnlyAboveHorizon: (v: boolean) => void;
   setDeclinationDeg: (d: number) => void;
+  setAutoSyncScope: (v: boolean) => void;
 }
 
 export const useSettingsStore = create<SettingsState>()(
@@ -54,6 +58,7 @@ export const useSettingsStore = create<SettingsState>()(
       lastUsbDevice: '',
       onlyAboveHorizon: true,
       declinationDeg: 0,
+      autoSyncScope: true,
       setLanguage: (language) => set({language}),
       setNightVision: (nightVision) => set({nightVision}),
       setKeySounds: (keySounds) => set({keySounds}),
@@ -65,6 +70,7 @@ export const useSettingsStore = create<SettingsState>()(
       setLastUsbDevice: (lastUsbDevice) => set({lastUsbDevice}),
       setOnlyAboveHorizon: (onlyAboveHorizon) => set({onlyAboveHorizon}),
       setDeclinationDeg: (declinationDeg) => set({declinationDeg}),
+      setAutoSyncScope: (autoSyncScope) => set({autoSyncScope}),
     }),
     {
       name: 'autostardroid-settings',

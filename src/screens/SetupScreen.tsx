@@ -5,7 +5,7 @@ import {useT} from '../i18n';
 import {useSettingsStore, SiteInfo} from '../store/settingsStore';
 import {useScopeStore} from '../store/scopeStore';
 import {autostar} from '../services/protocol/client';
-import {getPhonePosition} from '../services/phone/gps';
+import {getPhonePosition, GpsError} from '../services/phone/gps';
 import {setDemoSite} from '../services/connection/demo';
 import {StatusHeader} from '../components/StatusHeader';
 import {Btn, Card, Input, Title, Toggle, usePal} from '../components/ui';
@@ -21,6 +21,8 @@ export function SetupScreen() {
   const setNightVision = useSettingsStore((s) => s.setNightVision);
   const keySounds = useSettingsStore((s) => s.keySounds);
   const setKeySounds = useSettingsStore((s) => s.setKeySounds);
+  const autoSyncScope = useSettingsStore((s) => s.autoSyncScope);
+  const setAutoSyncScope = useSettingsStore((s) => s.setAutoSyncScope);
   const connStatus = useScopeStore((s) => s.connStatus);
   const scopeTime = useScopeStore((s) => s.scopeTime);
   const scopeDate = useScopeStore((s) => s.scopeDate);
@@ -63,7 +65,9 @@ export function SetupScreen() {
       setLonTxt(p.lonDeg.toFixed(4));
       setDemoSite(p.latDeg, p.lonDeg);
     } catch (e) {
-      Alert.alert(t.common.error, (e as Error).message);
+      // chaque cause a SON message (v2.1.2) : permission / services OFF / délai
+      const code = e instanceof GpsError ? e.code : 'unavailable';
+      Alert.alert(t.common.error, t.setup[`gps${code.charAt(0).toUpperCase()}${code.slice(1)}` as 'gpsPerm' | 'gpsOff' | 'gpsTimeout' | 'gpsUnavailable'] ?? String((e as Error).message));
     } finally {
       setBusy(false);
     }
@@ -113,6 +117,10 @@ export function SetupScreen() {
           <Btn label={t.setup.syncPhone} onPress={syncPhone} disabled={!connected || busy}
             variant="primary" style={{flex: 1.6, marginLeft: 6}} />
         </View>
+        <View style={{marginTop: 10}}>
+          <Toggle label={t.setup.autoSync} value={autoSyncScope} onChange={setAutoSyncScope} />
+          <Text style={{color: c.textFaint, fontSize: 11, marginTop: 2}}>{t.setup.autoSyncDesc}</Text>
+        </View>
       </Card>
 
       <Card style={{marginTop: 12}}>
@@ -130,11 +138,12 @@ export function SetupScreen() {
       <Card style={{marginTop: 12}}>
         <Title text={t.setup.about} />
         <Text style={{color: c.textDim, fontSize: 13, lineHeight: 19}}>
-          AutoStar Droid v1.0.2 — clone Android de ScopeBoss : émulation complète de la
-          raquette Meade Autostar II et des Autostar #49x, liaisons Wi-Fi, Bluetooth SPP,
-          USB-série (câble Meade #505/#507, FTDI, PL2303, CP210x, CH340), GOTO avec
-          catalogues Messier/NGC/étoiles/planètes, alignement guidé et synchronisation
-          automatique de la date, de l’heure et du site depuis le téléphone.
+          AutoStar Droid v2.1.2 — émulation complète de la raquette Meade Autostar II
+          et des Autostar #49x, liaisons Wi-Fi, Bluetooth SPP, USB-série (câble Meade
+          #505/#507, FTDI, PL2303, CP210x, CH340), GOTO avec catalogues
+          Messier/NGC/étoiles/planètes, alignement télémétrique (gyroscope/boussole),
+          mise à jour automatique de la raquette (date, heure, site) à la connexion et
+          reconnexion automatique USB/Bluetooth après un glitch de bus.
         </Text>
       </Card>
     </ScrollView>
