@@ -105,7 +105,8 @@ describe('v1.8.0 — GO TO toujours actif + miroir ALT/AZ', () => {
       s.setAltAz(37.2583, 200.5);
     });
     await mount();
-    const lcd = tree.root.findByType(LcdPanel);
+    // v1.8.2 : DEUX LcdPanel (miroir + AD/DEC permanent) — le miroir est 1er
+    const lcd = tree.root.findAllByType(LcdPanel)[0];
     expect(String(lcd.props.line1).startsWith('ALT')).toBe(true);
     expect(String(lcd.props.line2).startsWith('AZ')).toBe(true);
     expect(uncaught).toEqual([]);
@@ -119,7 +120,7 @@ describe('v1.8.0 — GO TO toujours actif + miroir ALT/AZ', () => {
       s.setAltAz(null, null);
     });
     await mount();
-    const lcd = tree.root.findByType(LcdPanel);
+    const lcd = tree.root.findAllByType(LcdPanel)[0];
     expect(lcd.props.line1).toBe('SYNCHRO LIVE');
     expect(uncaught).toEqual([]);
   });

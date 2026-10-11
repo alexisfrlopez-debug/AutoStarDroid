@@ -9,37 +9,43 @@
  *   du LX200) s'adaptent sans réglage. Si le firmware est muet ou
  *   inconnu, le modèle choisi dans Connexion/Réglages est conservé.
  *
- *   [ LCD 2×16 ]              <- LcdPanel, alimenté par le modèle de menus
- *   [badge FW + SYNCHRO]      <- état du firmware + synchro temps réel
- *   …rangées du mappage…      <- ENTER/MODE/GO TO, croix, pavé 0-9,
- *                                défilement + ? (ou clavier LX200)
+ *   [ LCD MIROIR │ LCD AD/DEC ]  <- 2 affichages côte à côte (v1.8.2) :
+ *   [ MODE ▲ ? ▼ ENTER ]        <-   miroir :ED# de la raquette physique
+ *   [badge FW + SYNCHRO]        <-   + AD/DEC PERMANENT (plus d'alternance)
+ *   …rangées du mappage…        <- navigation des menus DANS le cadre LCD,
+ *                                  puis croix, pavé 0-9, GO TO (ou clavier
+ *                                  LX200). Les panneaux (arbre des menus,
+ *                                  vitesse, mise au point) sont en BAS de
+ *                                  page.
  *
  * Synchronisation temps réel avec la raquette réelle — HAND CONTROL PANEL
  * (comportement du « Hand Control » d'AutostarSuite, branché en série/USB) :
- * quand la synchro est ACTIVE (par défaut à la connexion), le LCD affiche
- * EN CONTINU le même écran d'observation que la raquette physique (AD/DEC
- * relues toutes les 500 ms, alt/az en continu ; MODE bascule AD/DEC ↔
- * Alt/Az) ; pendant un slew rapide du matériel (GOTO, flèche haute vitesse)
- * l'écran miroir affiche « Slewing... » exactement comme le LCD du #497.
- * Les appuis SUR LA RAQUETTE PHYSIQUE sont répercutés : le mouvement constaté
- * allume la croix virtuelle (directions déduites des deltas AD/DEC) et
- * affiche ● PHYSIQUE. Les touches VIRTUELLES pilotent le télescope par le
- * protocole (flèches :Mn…/:Q*, GO TO :Sr/:Sd/:MS) — comme le panel ASU — et
- * la navigation MODE/ENTER/défilement des menus locaux n'est qu'un aperçu
- * temporaire qui rend la main à l'écran miroir après 5 s sans touche (ou
- * dès qu'un mouvement physique est constaté). Le bouton SYNCHRO sous
- * l'écran désactive (retour menu local) ou relance la synchro ; une pilule
- * ■ STOP apparaît pendant un mouvement. Le port série d'une raquette ne
- * transmettant pas ses touches de menu, les touches MODE/ENTER/défilement
- * pilotent le modèle de menus local, comme sur le matériel.
+ * quand la synchro est ACTIVE (par défaut à la connexion), l'affichage MIROIR
+ * montre EN CONTINU l'écran de la raquette physique (dump :ED# ; pendant un
+ * slew rapide du matériel il affiche « Slewing... » exactement comme le LCD
+ * du #497) tandis que l'affichage AD/DEC, PERMANENT, montre les coordonnées
+ * quel que soit l'état du miroir — les 2 informations coexistent, plus
+ * d'alternance (v1.8.2). Les appuis SUR LA RAQUETTE PHYSIQUE sont répercutés :
+ * le mouvement constaté allume la croix virtuelle (directions déduites des
+ * deltas AD/DEC) et affiche ● PHYSIQUE. Les touches VIRTUELLES pilotent le
+ * télescope par le protocole (flèches :Mn…/:Q*, GO TO :Sr/:Sd/:MS) — comme
+ * le panel ASU — et la navigation MODE/ENTER/défilement des menus locaux
+ * n'est qu'un aperçu temporaire qui rend la main à l'écran miroir après 5 s
+ * sans touche (ou dès qu'un mouvement physique est constaté). Le bouton
+ * SYNCHRO sous les écrans désactive (retour menu local) ou relance la
+ * synchro ; une pilule ■ STOP apparaît pendant un mouvement. Le port série
+ * d'une raquette ne transmettant pas ses touches de menu, les touches
+ * MODE/ENTER/défilement pilotent le modèle de menus local, comme sur le
+ * matériel.
  *
  * PANNEAU « HAND CONTROL » (fonctionnalités du Remote Handbox d'ASU,
- * manuel Meade chap. 7) : au-dessus du clavier se trouvent :
+ * manuel Meade chap. 7) — en BAS de page depuis v1.8.2 :
  *  - l'ARBRE DU MENU Autostar repliable, cliquable — accéder à une fonction
  *    en un seul appui (« fast and saves a lot of keystrokes ») ;
  *  - le sélecteur SLEW RATE (Guide/Center/Find/Slew) ;
  *  - la mise au point : FOCUS entrée/sortie (maintien) + vitesse :FS/:FM/:FF ;
- *  - la VOIX (Speech Enable) : le contenu de l'écran est énoncé (TTS natif).
+ *  - la VOIX (Speech Enable) reste juste sous les affichages : le contenu
+ *    de l'écran miroir est énoncé (TTS natif).
  */
 import {useEffect, useMemo, useRef, useState} from 'react';
 import {Pressable, Text, View, Vibration} from 'react-native';
@@ -303,11 +309,11 @@ export function VirtualHandbox() {
   };
   const mode = () => {
     if (keyMirror) {feedback(); ek(HB_KEYS.mode); return;}
-    // Comportement « Hand Control » (AutostarSuite) : sur l'écran
-    // d'observation miroir, MODE change d'écran d'information (AD/DEC ↔
+    // Comportement « Hand Control » (AutostarSuite) : sur l'écran miroir
+    // (hors menus locaux), MODE change la ligne de télémétrie (AD/DEC ↔
     // Alt/Az) — comme les touches d'affichage du #497 ; dans les menus
     // (aperçu local), MODE remonte d'un niveau comme sur le matériel.
-    if (mirrorActive && !cursor.length) {
+    if (mirrorBase && !cursor.length) {
       setPosView((v) => (v === 'radec' ? 'altaz' : 'radec'));
       return;
     }
@@ -501,8 +507,16 @@ export function VirtualHandbox() {
     }
   };
 
-  /* ---------- Affichage LCD (mode miroir de la raquette physique) ---------- */
-  const mirrorActive = connected && hbSync === 'live' && !msg && !overlay;
+  /* ---------- ÉCRAN MIROIR (LCD de gauche) ---------- */
+  // Hiérarchie : message → miroir :ED# frais → navigation des menus locaux →
+  // « Slewing... » → dernier dump :ED# tenu (creux de poll) → repli ALT/AZ →
+  // écran d'attente → accueil menu local. L'AD/DEC n'apparaît PLUS ici
+  // (v1.8.2) : il a son affichage permanent à droite — plus d'alternance.
+  const mirrorBase = connected && hbSync === 'live';
+  const mirrorActive = mirrorBase && !msg && !overlay;
+  // Navigation locale active = l'utilisateur manipule les menus de l'app
+  // (hors miroir :ED# frais : sinon les touches partent sur la raquette).
+  const localNav = !lcdFresh && (overlay || cursor.length > 0 || input.length > 0);
   // directions constatées SUR LE MATÉRIEL (croix virtuelle allumée en retour)
   const NO_DIR: Record<Dir, boolean> = {n: false, s: false, e: false, w: false};
   const phys: Record<Dir, boolean> = connected && hbExternal ? (hbDirs ?? NO_DIR) : NO_DIR;
@@ -511,63 +525,66 @@ export function VirtualHandbox() {
   };
   const dirGlyph = (d: Dir) => ({n: '▲', s: '▼', e: '▶', w: '◀'} as Record<Dir, string>)[d];
   const physGlyphs = (['n', 's', 'e', 'w'] as Dir[]).filter((d) => litDirs[d]).map(dirGlyph).join('');
-  let line1: string;
-  let line2: string;
+  const menuHome = () => {
+    line1 = 'Select Item';
+    line2 = '> ' + (root.children?.[0]?.line1 ?? '');
+  };
+  let line1: string = '';
+  let line2: string = '';
   if (msg) {
     line1 = msg.slice(0, 16);
     line2 = msg.slice(16, 32);
-  } else if (mirrorActive && lcdFresh) {
+  } else if (lcdFresh) {
     // MIROIR LCD LITTÉRAL (v1.8.1) : l'écran EXACT de la raquette physique
     // (dump :ED# frais, 2 lignes de 16) — le Hand Control Panel affiche ce
     // que le matériel affiche, au caractère près, y compris ses menus.
     line1 = lcdLine1 as string;
     line2 = lcdLine2 as string;
-  } else if (mirrorActive && !hasPos) {
-    // Synchro live sans AD/DEC utilisable. REPLI ALT/AZ (v1.8.0) : si
-    // l'horizontale est lue en continu (raquette muette en AD/DEC mais
-    // bavarde en :Ga#/:Gz#), le miroir l'affiche au lieu d'attendre.
-    if (altDeg !== null && azDeg !== null) {
-      line1 = `ALT ${decDegToDMS(altDeg)}`;
-      line2 = `AZ ${decDegToDMS(azDeg)}`;
+  } else if (localNav) {
+    // Aperçu des menus locaux (navigation hors miroir frais) — le LCD suit
+    // MODE/ENTER/▲▼/chiffres comme l'écran de la raquette.
+    if (!cursor.length) {
+      menuHome();
     } else {
-      // PAS de faux « RA 00:00:00 » — le diagnostic suit sous les pastilles
-      line1 = 'SYNCHRO LIVE';
-      line2 = hintLcd(hbHint, t).slice(0, 16);
+      line1 = parent.line1.slice(0, 16);
+      line2 = '> ' + (input ? input + '_' : (selected.line1 ?? ''));
     }
-  } else if (mirrorActive && hbSlewFast) {
+  } else if (mirrorBase && hbSlewFast) {
     // Slew rapide constaté sur le matériel (GOTO ou flèche haute vitesse) :
     // le LCD de la raquette physique affiche « Slewing... » pendant ces
     // mouvements — le miroir l'affiche À L'IDENTIQUE (libellé matériel du
     // #497, volontairement non traduit, comme sur le vrai écran).
     line1 = `RA ${raDegToHMS(raDeg)}`;
     line2 = 'Slewing...';
-  } else if (mirrorActive) {
-    // Écran d'observation synchronisé : identique à la raquette physique.
-    // MODE (ou appui sur la ligne de télémétrie) bascule AD/DEC ↔ Alt/Az ;
-    // tant que :Ga#/:Gz# n'ont rien lu, on reste sur AD/DEC (jamais d'écran
-    // vide — le miroir est continu).
-    if (posView === 'altaz' && altDeg !== null && azDeg !== null) {
-      line1 = `ALT ${decDegToDMS(altDeg)}`;
-      line2 = `AZ ${decDegToDMS(azDeg)}`;
-    } else {
-      line1 = `RA ${raDegToHMS(raDeg)}`;
-      line2 = `DEC ${decDegToDMS(decDeg)}`;
-    }
-  } else if (!cursor.length && connected && hbSync === 'live' && hasPos) {
-    // aperçu menu terminé : dernière position connue maintenue à l'écran
-    // (le diagnostic éventuel est détaillé par la ligne rouge sous les
-    // pastilles)
-    line1 = `RA ${raDegToHMS(raDeg)}`;
-    line2 = `DEC ${decDegToDMS(decDeg)}`;
-  } else if (!cursor.length) {
-    line1 = 'Select Item';
-    line2 = '> ' + (root.children?.[0]?.line1 ?? '');
+  } else if (mirrorBase && lcdLine1 !== null && lcdLine2 !== null) {
+    // Creux de poll : le dernier dump :ED# est TENU à l'écran au lieu de
+    // faire alterner miroir / repli à chaque lecture manquée (v1.8.2) —
+    // la pilule ▤ MIROIR LCD repasse au vert dès que le dump reprend.
+    line1 = lcdLine1;
+    line2 = lcdLine2;
+  } else if (mirrorBase && altDeg !== null && azDeg !== null) {
+    // REPLI ALT/AZ (v1.8.0) : raquette muette en AD/DEC mais bavarde en
+    // :Ga#/:Gz# → le miroir affiche l'horizontale au lieu d'attendre.
+    line1 = `ALT ${decDegToDMS(altDeg)}`;
+    line2 = `AZ ${decDegToDMS(azDeg)}`;
+  } else if (mirrorBase) {
+    // Synchro live sans rien d'affichable : écran d'attente — PAS de faux
+    // « RA 00:00:00 » (le diagnostic détaillé suit sous les affichages).
+    line1 = 'SYNCHRO LIVE';
+    line2 = hintLcd(hbHint, t).slice(0, 16);
   } else {
-    line1 = parent.line1.slice(0, 16);
-    line2 = '> ' + (input ? input + '_' : (selected.line1 ?? ''));
+    // Hors ligne / synchro coupée : accueil des menus locaux.
+    menuHome();
   }
+
+  /* ---------- AD/DEC PERMANENT (LCD de droite, v1.8.2) ---------- */
+  // Toujours les coordonnées, quel que soit l'état du miroir (menus, messages,
+  // attente, hors-ligne) : les 2 informations coexistent, plus d'alternance.
+  const rdLine1 = hasPos ? `RA ${raDegToHMS(raDeg)}` : 'RA --:--:--';
+  const rdLine2 = hasPos ? `DEC ${decDegToDMS(decDeg)}` : 'DEC --°--';
+
   const ctxLine = selected.line2 ?? '';
-  // Ligne de télémétrie sous l'écran (appui = bascule AD/DEC ↔ Alt/Az)
+  // Ligne de télémétrie sous les affichages (appui = bascule AD/DEC ↔ Alt/Az)
   // — tirets tant qu'aucune position n'a été lue sur cette liaison
   const raDecText = !hasPos
     ? (altDeg !== null && azDeg !== null
@@ -703,6 +720,34 @@ export function VirtualHandbox() {
     }
   };
 
+  /** Bouton de NAVIGATION DES MENUS (v1.8.2) : rendu DANS le cadre des
+   *  écrans LCD, comme sur le matériel où MODE/ENTER/▲▼ entourent
+   *  l'afficheur. Plus compact que CmdKey (5 boutons sur une rangée). */
+  const NavKey = ({label, onPress, onLongPress}: {label: string; onPress: () => void; onLongPress?: () => void}) => (
+    <Pressable
+      onPress={safe(() => {feedback(); onPress();})}
+      onLongPress={onLongPress ? safe(onLongPress) : undefined}
+      delayLongPress={600}
+      style={({pressed}) => ({
+        flex: 1, height: 40, borderRadius: 9, justifyContent: 'center', alignItems: 'center',
+        backgroundColor: pressed ? c.btnActive : c.btnBg, borderWidth: 1,
+        borderColor: pressed ? c.amber : c.border, marginHorizontal: 2,
+      })}>
+      <Text numberOfLines={1} style={{color: c.amber, fontWeight: '800', fontSize: 12, letterSpacing: 0.5}}>
+        {label}
+      </Text>
+    </Pressable>
+  );
+
+  const renderNavKey = (k: KeySpec, key: string) => {
+    if (k.t !== 'act') return <View key={key} style={{flex: 1}} />;
+    const label = keyLabel(k);
+    return (
+      <NavKey key={key} label={label} onPress={() => runAct(k.act, label)}
+        onLongPress={k.act === 'mode' ? modeRoot : undefined} />
+    );
+  };
+
   /* ---------- Boutons de synchro temps réel et d'arrêt d'urgence ---------- */
   const pillBox = (bg: string, border: string) => ({
     height: 26, borderRadius: 13, justifyContent: 'center' as const, alignItems: 'center' as const,
@@ -776,8 +821,34 @@ export function VirtualHandbox() {
 
   return (
     <View>
-      {/* LCD + état live de la raquette réelle */}
-      <LcdPanel line1={line1} line2={line2} />
+      {/* ——— CADRE LCD : miroir + AD/DEC permanent + navigation des menus ——— */}
+      <View style={{
+        borderWidth: 1.5, borderColor: c.border, borderRadius: 14,
+        backgroundColor: c.bgPanel2, padding: 10,
+      }}>
+        <View style={{flexDirection: 'row'}}>
+          <View style={{flex: 1, marginRight: 3}}>
+            <Text style={{color: c.textFaint, fontSize: 8.5, fontWeight: '800', letterSpacing: 1, textAlign: 'center', marginBottom: 3}}>
+              {t.hb.lcdMirrorTitle}
+            </Text>
+            <LcdPanel line1={line1} line2={line2} height={80} fontSize={13} letterSpacing={0.5} />
+          </View>
+          <View style={{flex: 1, marginLeft: 3}}>
+            <Text style={{color: c.textFaint, fontSize: 8.5, fontWeight: '800', letterSpacing: 1, textAlign: 'center', marginBottom: 3}}>
+              {t.hb.lcdRaDecTitle}
+            </Text>
+            {/* PERMANENT : les coordonnées restent affichées quel que soit
+                l'état du miroir (menus, messages, attente) — v1.8.2. */}
+            <LcdPanel line1={rdLine1} line2={rdLine2} height={80} fontSize={13} letterSpacing={0.5} />
+          </View>
+        </View>
+        {/* Boutons de navigation des menus — même cadre que les écrans */}
+        <View style={{flexDirection: 'row', marginTop: 9}}>
+          {keymap.navRow.map((k, ki) => renderNavKey(k, `nav-${model}-${ki}`))}
+        </View>
+      </View>
+
+      {/* État live de la raquette réelle (télémétrie + pilules) */}
       <View style={{flexDirection: 'row', alignItems: 'center', marginTop: 6, paddingHorizontal: 2}}>
         <Pressable
           onPress={safe(() => setPosView((v) => (v === 'radec' ? 'altaz' : 'radec')))}
@@ -823,11 +894,37 @@ export function VirtualHandbox() {
         </Text>
       ) : null}
 
-      {/* ——— Panneau ASU : AutoStar Menu (arbre cliquable) ——— */}
+      {/* ——— Voix (Speech Enable — le LCD miroir est énoncé) ——— */}
+      <View style={{marginTop: 10}}>
+        <Toggle value={speech} onChange={(v) => safe(() => toggleSpeech(v))()} label={t.hb.speech} />
+      </View>
+
+      {/* Clavier — rangées issues du mappage du firmware détecté */}
+      {keymap.rows.map((row, ri) => (
+        <View
+          key={`${model}-${ri}`}
+          style={{
+            flexDirection: 'row',
+            marginTop: ri === 0 ? 10 : (row.center ? 8 : 2),
+            justifyContent: row.center ? 'center' : 'flex-start',
+            alignItems: row.center ? 'center' : 'stretch',
+          }}>
+          {row.keys.map((k, ki) => renderKey(k, `${ki}`))}
+        </View>
+      ))}
+
+      <Text style={{color: c.textFaint, fontSize: 10, textAlign: 'center', marginTop: 10, lineHeight: 15}}>
+        {t.hb.keypadHelp}
+      </Text>
+
+      {/* ——— PANNEAUX « HAND CONTROL » — déplacés en bas de page (v1.8.2) ——— */}
+      <View style={{height: 1, backgroundColor: c.border, marginTop: 14, marginBottom: 2}} />
+
+      {/* Panneau ASU : AutoStar Menu (arbre cliquable) */}
       <Pressable
         onPress={safe(() => {feedback(); setTreeOpen(!treeOpen);})}
         style={({pressed}) => ({
-          flexDirection: 'row', alignItems: 'center', marginTop: 12,
+          flexDirection: 'row', alignItems: 'center', marginTop: 10,
           paddingVertical: 9, paddingHorizontal: 10,
           borderRadius: 10, borderWidth: 1, borderColor: c.border,
           backgroundColor: pressed ? c.bgPanel2 : c.btnBg,
@@ -848,7 +945,7 @@ export function VirtualHandbox() {
         </View>
       ) : null}
 
-      {/* ——— Panneau ASU : Slew Rate ——— */}
+      {/* Panneau ASU : Slew Rate */}
       <Text style={{color: c.textDim, fontSize: 11, fontWeight: '800', letterSpacing: 1, marginTop: 12, marginBottom: 5}}>
         {t.hb.slewRate.toUpperCase()}
       </Text>
@@ -863,7 +960,7 @@ export function VirtualHandbox() {
         onChange={(v) => safe(() => applySpeed(v))()}
       />
 
-      {/* ——— Panneau ASU : Focus In/Out (maintien) + Focus Speed ——— */}
+      {/* Panneau ASU : Focus In/Out (maintien) + Focus Speed */}
       <Text style={{color: c.textDim, fontSize: 11, fontWeight: '800', letterSpacing: 1, marginTop: 12, marginBottom: 5}}>
         {t.hb.focusPanel.toUpperCase()}
       </Text>
@@ -886,29 +983,6 @@ export function VirtualHandbox() {
           })()}
         />
       </View>
-
-      {/* ——— Panneau ASU : Speech Enable (le LCD est énoncé) ——— */}
-      <View style={{marginTop: 10}}>
-        <Toggle value={speech} onChange={(v) => safe(() => toggleSpeech(v))()} label={t.hb.speech} />
-      </View>
-
-      {/* Clavier — rangées issues du mappage du firmware détecté */}
-      {keymap.rows.map((row, ri) => (
-        <View
-          key={`${model}-${ri}`}
-          style={{
-            flexDirection: 'row',
-            marginTop: ri === 0 ? 10 : (row.center ? 8 : 2),
-            justifyContent: row.center ? 'center' : 'flex-start',
-            alignItems: row.center ? 'center' : 'stretch',
-          }}>
-          {row.keys.map((k, ki) => renderKey(k, `${ki}`))}
-        </View>
-      ))}
-
-      <Text style={{color: c.textFaint, fontSize: 10, textAlign: 'center', marginTop: 10, lineHeight: 15}}>
-        {t.hb.keypadHelp}
-      </Text>
     </View>
   );
 }

@@ -7,14 +7,21 @@
  * automatiquement (composition des rangées, étiquettes secondaires,
  * comportement des chiffres, touches dédiées LX200…).
  *
- *   - Autostar #497 / #495 / #494 : clavier historique (ENTER/MODE/GO TO,
- *     croix, pavé 0-9, défilement + ?) ; les chiffres 1-9 portent les
- *     raccourcis vitesse des #49x (GUIDE/CENTER/FIND/SLEW).
+ * Chaque mappage sépare deux zones (v1.8.2) :
+ *   - navRow : les BOUTONS DE NAVIGATION DES MENUS (MODE, ENTER, défilement
+ *     ▲▼, ?, PREV/NEXT du LX200) — rendus DANS le cadre des écrans LCD,
+ *     comme sur le matériel où ces touches entourent l'afficheur ;
+ *   - rows   : le clavier principal (croix directionnelle, pavé 0-9,
+ *     GO TO, touches dédiées FOCUS/RÉTICULE/SPEED).
+ *
+ *   - Autostar #497 / #495 / #494 : clavier historique (croix, pavé 0-9,
+ *     GO TO) ; les chiffres 1-9 portent les raccourcis vitesse des #49x
+ *     (GUIDE/CENTER/FIND/SLEW) ; le #494 n'a pas de touche ?.
  *   - Autostar II : mêmes rangées, mais étiquettes secondaires doubles
  *     (SPEED/CALD/M/FOCUS/SS/STAR/RET/LC./NGC) et sauts de menu.
- *   - LX200 classique : clavier propre (MODE/ENTER/PREV/NEXT, croix,
- *     rangée FOCUS/RÉTICULE, pavé chiffré + SPEED) ; ENTER valide et
- *     pointe, SPEED cycle les vitesses.
+ *   - LX200 classique : clavier propre (croix, rangée FOCUS/RÉTICULE,
+ *     pavé chiffré + SPEED) ; ENTER (navRow) valide ET pointe, SPEED
+ *     cycle les vitesses.
  */
 import type {ScopeModelId} from '../../store/settingsStore';
 import type {Dir} from './client';
@@ -43,6 +50,10 @@ export interface KeyRow {keys: KeySpec[]; center?: boolean}
 export interface Keymap {
   /** Comportement des chiffres hors saisie de liste. */
   digitMode: 'speedShortcuts' | 'menuJumps' | 'plain';
+  /** Boutons de navigation des menus — rendus dans le cadre des écrans LCD
+   *  (v1.8.2) : MODE, ENTER, défilement ▲▼, ?, ou PREV/NEXT du LX200. */
+  navRow: KeySpec[];
+  /** Clavier principal : croix, pavé 0-9, GO TO, touches dédiées. */
   rows: KeyRow[];
 }
 
@@ -83,63 +94,62 @@ const DIGITS_AUTOSTAR2: KeyRow[] = [
   {keys: [gap, digit(0, 'LIGHT'), gap]},
 ];
 
-const cmdRow = (a: KeySpec, b: KeySpec, c: KeySpec): KeyRow[] => [{keys: [a, b, c]}];
+/** GO TO : rangée dédiée du clavier principal (touche isolée du #497). */
+const gotoRow: KeyRow = {keys: [gap, act('goto', 'goto'), gap]};
+
+/** navRow #49x / Autostar II : MODE | ▲ ? ▼ | ENTER (disposition matériel). */
+const NAV_49X: KeySpec[] = [
+  act('mode', 'mode'),
+  act('scrollUp', 'up', '▲'),
+  act('help', 'help'),
+  act('scrollDown', 'down', '▼'),
+  act('enter', 'enter'),
+];
 
 export const KEYMAPS: Record<ScopeModelId, Keymap> = {
   /* ---- Autostar #497 (ETX/LX90) — clavier physique de référence ---- */
   autostar497: {
     digitMode: 'speedShortcuts',
-    rows: [
-      ...cmdRow(act('enter', 'enter'), act('mode', 'mode'), act('goto', 'goto')),
-      ...CROSS,
-      ...DIGITS,
-      {keys: [act('scrollUp', 'up', '▲'), act('help', 'help'), act('scrollDown', 'down', '▼')]},
-    ],
+    navRow: NAV_49X,
+    rows: [...CROSS, ...DIGITS, gotoRow],
   },
 
   /* ---- Autostar #495 : identique au #497 (raccourcis vitesse inclus) ---- */
   autostar495: {
     digitMode: 'speedShortcuts',
-    rows: [
-      ...cmdRow(act('enter', 'enter'), act('mode', 'mode'), act('goto', 'goto')),
-      ...CROSS,
-      ...DIGITS,
-      {keys: [act('scrollUp', 'up', '▲'), act('help', 'help'), act('scrollDown', 'down', '▼')]},
-    ],
+    navRow: NAV_49X,
+    rows: [...CROSS, ...DIGITS, gotoRow],
   },
 
   /* ---- Autostar #494 : pas de touche ? (aide) sur le matériel ---- */
   autostar494: {
     digitMode: 'speedShortcuts',
-    rows: [
-      ...cmdRow(act('enter', 'enter'), act('mode', 'mode'), act('goto', 'goto')),
-      ...CROSS,
-      ...DIGITS,
-      {keys: [act('scrollUp', 'up', '▲'), act('scrollDown', 'down', '▼')], center: true},
+    navRow: [
+      act('mode', 'mode'),
+      act('scrollUp', 'up', '▲'),
+      act('scrollDown', 'down', '▼'),
+      act('enter', 'enter'),
     ],
+    rows: [...CROSS, ...DIGITS, gotoRow],
   },
 
   /* ---- Autostar II (LX200GPS/RMS) : doubles étiquettes + sauts de menu ---- */
   autostar2: {
     digitMode: 'menuJumps',
-    rows: [
-      ...cmdRow(act('enter', 'enter'), act('mode', 'mode'), act('goto', 'goto')),
-      ...CROSS,
-      ...DIGITS_AUTOSTAR2,
-      {keys: [act('scrollUp', 'up', '▲'), act('help', 'help'), act('scrollDown', 'down', '▼')]},
-    ],
+    navRow: NAV_49X,
+    rows: [...CROSS, ...DIGITS_AUTOSTAR2, gotoRow],
   },
 
   /* ---- LX200 classique : clavier dédié du handpad d'origine ---- */
   lx200: {
     digitMode: 'plain',
+    navRow: [
+      act('mode', 'mode'),
+      act('scrollUp', 'prev', 'PREV'),
+      act('scrollDown', 'next', 'NEXT'),
+      act('enterGoto', 'enter'),
+    ],
     rows: [
-      {keys: [
-        act('mode', 'mode'),
-        act('enterGoto', 'enter'),
-        act('scrollUp', 'prev', 'PREV'),
-        act('scrollDown', 'next', 'NEXT'),
-      ]},
       ...CROSS,
       {keys: [
         act('focusIn', 'focusIn', 'MAP −'),

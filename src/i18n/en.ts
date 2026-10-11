@@ -106,6 +106,7 @@ export const en = {
   hb: {
     title: 'Handbox',
     tabKeypad: 'Handbox', tabStation: 'Polar align',
+    lcdMirrorTitle: 'MIRROR', lcdRaDecTitle: 'RA · DEC',
     keypadHelp: 'Arrows: hold to slew · menus: 5 s preview, then back to the physical handbox screen · MODE long-press = top · digits = entry / shortcuts',
     helpGeneric: 'Autostar Droid — press ? on any item for help',
     keys: {mode: 'MODE', enter: 'ENTER', goto: 'GO TO', help: '?'},

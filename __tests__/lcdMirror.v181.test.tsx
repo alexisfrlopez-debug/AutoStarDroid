@@ -251,6 +251,18 @@ function pressableWithLabel(label: string) {
   });
 }
 
+/** Toutes les touches portant ce libellé (v1.8.2 : la nav ▲▼ du cadre LCD
+ *  précède la croix directionnelle dans l'arbre — il faut les distinguer). */
+function pressablesWithLabel(label: string) {
+  const nodes = tree.root.findAll((n: any) => n.type && n.type.displayName === 'Pressable');
+  return nodes.filter((n: any) => {
+    try {
+      return n.findAll((t: any) => t.type === 'Text')
+        .some((t: any) => String(t.props.children).trim() === label);
+    } catch (_) {return false;}
+  });
+}
+
 describe('v1.8.1 — VirtualHandbox : touches → :EK# en miroir', () => {
   afterEach(async () => {
     if (tree) {tree.unmount(); tree = null;}
@@ -294,11 +306,23 @@ describe('v1.8.1 — VirtualHandbox : touches → :EK# en miroir', () => {
     });
     expect(spy).toHaveBeenCalledWith(HB_KEYS.goto);
 
-    // 4) flèche N (▲) → :EK85#
+    // 4) flèche N de la CROIX (maintien : onPressIn) → :EK85# — la nav ▲ du
+    //    cadre LCD porte le même libellé mais déclenche via onPress
     spy.mockClear();
     await act(async () => {
-      const arrow = pressableWithLabel('▲');
-      arrow!.props.onPressIn();
+      const arrows = pressablesWithLabel('▲');
+      const cross = arrows.find((n: any) => typeof n.props.onPressIn === 'function');
+      cross!.props.onPressIn();
+      await flush(10);
+    });
+    expect(spy).toHaveBeenCalledWith(HB_KEYS.up);
+
+    // 4bis) bouton ▲ de NAVIGATION (cadre LCD, onPress) → :EK85# aussi
+    //    (le défilement miroir envoie la touche HAUT physique, comme le #497)
+    spy.mockClear();
+    await act(async () => {
+      const nav = pressablesWithLabel('▲').find((n: any) => typeof n.props.onPress === 'function');
+      nav!.props.onPress();
       await flush(10);
     });
     expect(spy).toHaveBeenCalledWith(HB_KEYS.up);

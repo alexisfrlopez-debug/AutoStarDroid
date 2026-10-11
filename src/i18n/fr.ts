@@ -108,6 +108,7 @@ export const fr: Dict = {
   hb: {
     title: 'Raquette',
     tabKeypad: 'Raquette', tabStation: 'Mise en station',
+    lcdMirrorTitle: 'MIROIR', lcdRaDecTitle: 'AD · DEC',
     keypadHelp: 'Flèches : maintenir pour pointer · menus = aperçu 5 s puis retour à l’écran de la raquette physique · MODE appui long = accueil · chiffres = saisie / raccourcis',
     helpGeneric: 'AutoStar Droid — touche ? pour l’aide de chaque item',
     keys: {mode: 'MODE', enter: 'ENTER', goto: 'GO TO', help: '?'},
