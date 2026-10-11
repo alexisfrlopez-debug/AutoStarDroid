@@ -4,6 +4,7 @@
  * suivi sidéral, horizon, alignement, date/heure/site réels du téléphone.
  */
 import {raDecToAltAz, altAzToRaDec, separationDeg} from '../astro/coords';
+import {lonDegFromMeade} from '../astro/time';
 import type {ScopeModelId} from '../../store/settingsStore';
 
 const D2R = Math.PI / 180;
@@ -36,7 +37,7 @@ export class DemoScopeBrain {
   private selDec = '+00*00';
   private focusMoving: '+' | '-' | null = null;
   private focusPos = 0;
-  private tzOffset = 0; // sHH (négatif = ouest)
+  private tzOffset = 0; // HEURES (float) — sHH MEADE : heures ajoutées à l'heure LOCALE pour obtenir UTC (= UTC − local — positif = OUEST, France été = −2)
   private pendingAlign: string | null = null;
   private fwProduct = 'Autostar II';
   private fwVersion = '43Eg';
@@ -153,10 +154,18 @@ export class DemoScopeBrain {
         return `${p(d.getUTCMonth() + 1)}/${p(d.getUTCDate())}/${String(d.getUTCFullYear()).slice(2)}#`;
       }
       case c === ':GG':
-        return `${this.tzOffset >= 0 ? '+' : '-'}${String(Math.abs(Math.round(this.tzOffset / 3600))).padStart(2, '0')}#`;
+        return `${this.tzOffset >= 0 ? '+' : '-'}${String(Math.abs(Math.round(this.tzOffset))).padStart(2, '0')}#`;
       case c.startsWith(':SG'): {
-        const m = c.match(/^:SG([+-])(\d{1,2})/);
-        if (m) this.tzOffset = (m[1] === '-' ? -1 : 1) * +m[2] * 3600;
+        // :SG MEADE = heures ajoutées à l'heure locale pour obtenir UTC
+        // (UTC − local). Accepte les heures fractionnaires (« -05.5 » Inde).
+        // Stockage en HEURES (v2.2.1 : l'ancien code stockait des secondes
+        // que :GL/:GC consommaient comme des heures — horloge démo déraillée
+        // après chaque push site en mode démo).
+        const m = c.match(/^:SG([+-])(\d{1,2})(?:\.(\d{1,2}))?/);
+        if (m) {
+          const frac = m[3] ? +m[3] / Math.pow(10, m[3].length) : 0;
+          this.tzOffset = (m[1] === '-' ? -1 : 1) * (+m[2] + frac);
+        }
         return '1#';
       }
       case c.startsWith(':SL'): {
@@ -168,7 +177,8 @@ export class DemoScopeBrain {
       case c === ':Gt':
         return this.dms(this.site.latDeg) + '#';
       case c === ':Gg':
-        return this.dms(this.site.lonDeg) + '#';
+        // MEADE (v2.2.1) : Est NÉGATIF, DDD sur 3 chiffres ("-002*21" Paris)
+        return this.dmsLon(-this.site.lonDeg) + '#';
       case c.startsWith(':St'): {
         const v = this.parseDms(c.slice(3));
         if (v === null || Math.abs(v) > 90) return '0#';
@@ -178,7 +188,9 @@ export class DemoScopeBrain {
       case c.startsWith(':Sg'): {
         const v = this.parseDms(c.slice(3));
         if (v === null) return '0#';
-        this.site.lonDeg = v; this.sites[this.activeSite] = {...this.site};
+        // MEADE (v2.2.1) : le paramètre est Est-négatif signé (ou 0-360
+        // Ouest-positif selon firmware) — stockage interne cartographique.
+        this.site.lonDeg = lonDegFromMeade(v); this.sites[this.activeSite] = {...this.site};
         return '1#';
       }
       case c === ':GM': case c === ':GN': case c === ':GO': case c === ':GP':
@@ -281,6 +293,17 @@ export class DemoScopeBrain {
     const mm2 = mm === 60 ? 0 : mm;
     const dd2 = mm === 60 ? dd + 1 : dd;
     return `${sign}${p(dd2)}*${p(mm2)}`;
+  }
+
+  /** Longitude MEADE : degrés sur 3 chiffres (DDD*MM) — cf. :Gg réel. */
+  private dmsLon(deg: number): string {
+    const sign = deg < 0 ? '-' : '+';
+    const d = Math.abs(deg);
+    const dd = Math.floor(d);
+    const mm = Math.round((d - dd) * 60);
+    const mm2 = mm === 60 ? 0 : mm;
+    const dd2 = mm === 60 ? dd + 1 : dd;
+    return `${sign}${String(Math.min(360, dd2)).padStart(3, '0')}*${p(mm2)}`;
   }
 
   private hmsToDeg(s: string): number | null {

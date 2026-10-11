@@ -90,6 +90,7 @@ export const fr: Dict = {
       limits: 'Butées',
       rates: 'Taux centre/find/slew',
       altaz: 'Alt-Az', polar: 'Polaire',
+      notExposed: 'La raquette ne transmet PAS la monture choisie (Meade ne l’expose pas en série) : « Auto » ne fait qu’une hypothèse d’après le modèle de raquette (#497 → ETX-125…). Si votre raquette est réglée sur une autre monture — ex. DS-114 —, choisissez-la ci-dessous : le choix manuel fait foi.',
     },
     readMode: 'Lire le mode actuel',
     setMode: 'Appliquer le mode',

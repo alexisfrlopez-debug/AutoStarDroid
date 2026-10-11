@@ -9,7 +9,7 @@ import {BluetoothTransport} from '../connection/bluetooth';
 import {UsbTransport, UsbSerialNative} from '../connection/usb';
 import {DemoTransport, setDemoSite} from '../connection/demo';
 import {SPEED_CMDS} from './profiles';
-import {proto} from '../astro/time';
+import {proto, lonDegFromMeade} from '../astro/time';
 import type {ScopeModelId} from '../../store/settingsStore';
 import {useSettingsStore} from '../../store/settingsStore';
 import {useScopeStore} from '../../store/scopeStore';
@@ -965,18 +965,42 @@ export class AutostarClient {
       this.cmd(':Gt#', 3000, VALID.dec).catch(() => ''),
       this.cmd(':Gg#', 3000, VALID.dec).catch(() => ''),
     ]);
-    return {time, date, tz, latDeg: parseDec(lat), lonDeg: parseDec(lon)};
+    // v2.2.1 — MEADE → cartographique :
+    //  - :Gg# renvoie la longitude avec l'EST NÉGATIF ("-002*21" pour Paris)
+    //    ou en 0-360 Ouest-positif ("357*39") selon le firmware — les deux
+    //    formes sont converties vers Est-positif (lonDegFromMeade) ;
+    //  - :GG# renvoie les heures ajoutées à l'heure locale pour obtenir UTC
+    //    ("-02" en France été) — affiché en convention standard ("+02.0").
+    const lonMeade = parseDec(lon);
+    const tzMeade = parseFloat(tz);
+    return {
+      time,
+      date,
+      tz: Number.isNaN(tzMeade) ? tz : String(-tzMeade),
+      latDeg: parseDec(lat),
+      lonDeg: lonMeade === null ? null : lonDegFromMeade(lonMeade),
+    };
   }
 
   /** Envoie date/heure/site du téléphone vers la raquette. Les commandes
    *  :SG/:SL/:SC/:St/:Sg RÉPONDENT ("1") — la réponse est consommée (et
    *  tolérée si muette) au lieu de rester dans le tampon série.
    *  Renvoie (v2.1.2) l'heure/date LOCALES envoyées ('HH:MM:SS' / 'MM/JJ/AA')
-   *  pour que l'appelant (sync manuelle ou auto) rafraîchisse l'affichage. */
+   *  pour que l'appelant (sync manuelle ou auto) rafraîchisse l'affichage.
+   *  v2.2.1 — CONVENTIONS MEADE (protocole révision 2010.10, cf. INDI) :
+   *   - :SG = heures à AJOUTER à l'heure LOCALE pour obtenir UTC, soit
+   *     UTC − local — l'opposé du décalage cartographique (France été →
+   *     "−02.0", EST américain → "+05.0") ;
+   *   - :Sg = longitude signée avec l'EST NÉGATIF (Paris → "−002*21").
+   *     L'ancien code envoyait la valeur Est-positive brute : la raquette
+   *     lisait « 2°21' OUEST » pour Paris → TSL décalé, pointage AD décalé
+   *     (sensation d'Est/Ouest inversés).
+   *   - un refus explicite ("0") est journalisé : un site/fuseau refusé
+   *     laissait la raquette sur ses valeurs manuelles, sans le dire. */
   async pushPhoneData(latDeg: number, lonDeg: number): Promise<{time: string; date: string}> {
     this.bump();
     const now = new Date();
-    const tzOffsetMin = -now.getTimezoneOffset();
+    const tzOffsetMin = -now.getTimezoneOffset(); // standard : local − UTC (+120 France été)
     // :SG accepte les heures décimales fractionnaires (ex. +05.5 pour l'Inde)
     const tzH = Math.floor(Math.abs(tzOffsetMin) / 60);
     const tzM = Math.abs(tzOffsetMin) % 60;
@@ -989,17 +1013,24 @@ export class AutostarClient {
     const dd = String(local.getUTCDate()).padStart(2, '0');
     const mo = String(local.getUTCMonth() + 1).padStart(2, '0');
     const yy = String(local.getUTCFullYear()).slice(2);
-    const ignore = () => undefined;
-    await this.cmd(`:SG${tzOffsetMin >= 0 ? '+' : '-'}${tzVal}#`, 2000, VALID.bit).catch(ignore);
+    const rejected: string[] = [];
+    const send = async (cmdStr: string, timeoutMs: number) => {
+      const r = await this.cmd(cmdStr, timeoutMs, VALID.bit).catch(() => null);
+      if (r === '0') rejected.push(cmdStr.slice(0, 3));
+    };
+    await send(`:SG${tzOffsetMin >= 0 ? '-' : '+'}${tzVal}#`, 2000);
     await sleep(120);
-    await this.cmd(`:SL${hh}:${mm}:${ss}#`, 2000, VALID.bit).catch(ignore);
+    await send(`:SL${hh}:${mm}:${ss}#`, 2000);
     await sleep(120);
-    await this.cmd(`:SC${mo}/${dd}/${yy}#`, 2500, VALID.bit).catch(ignore);
+    await send(`:SC${mo}/${dd}/${yy}#`, 2500);
     await sleep(400);
-    await this.cmd(`:St${proto.decCmd(latDeg)}#`, 2000, VALID.bit).catch(ignore);
+    await send(`:St${proto.decCmd(latDeg)}#`, 2000);
     await sleep(120);
-    const lonMeade = lonDeg < 0 ? 360 + lonDeg : lonDeg;
-    await this.cmd(`:Sg${proto.decCmd(lonMeade)}#`, 2000, VALID.bit).catch(ignore);
+    await send(`:Sg${proto.lonCmd(lonDeg)}#`, 2000);
+    if (rejected.length > 0) {
+      useScopeStore.getState().pushLog('warn',
+        `Raquette : commandes refusées (${rejected.join(', ')}) — fuseau/site non appliqués, vérifiez Réglages`);
+    }
     return {time: `${hh}:${mm}:${ss}`, date: `${mo}/${dd}/${yy}`};
   }
 

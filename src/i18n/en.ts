@@ -88,6 +88,7 @@ export const en = {
       limits: 'Limits',
       rates: 'Center/find/slew rates',
       altaz: 'Alt-Az', polar: 'Polar',
+      notExposed: 'The handbox does NOT report the selected mount (Meade does not expose it over serial): "Auto" only infers a guess from the handbox model (#497 → ETX-125…). If your handbox is set to a different mount — e.g. DS-114 — pick it below: the manual choice takes precedence.',
     },
     readMode: 'Read current mode',
     setMode: 'Apply mode',

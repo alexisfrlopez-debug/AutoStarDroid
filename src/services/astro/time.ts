@@ -82,7 +82,40 @@ export const proto = {
   decCmdHigh(decDeg: number): string {
     return decDegToMeade(decDeg, true);
   },
+  /**
+   * LONGITUDE "sDDD*MM" pour :Sg — convention MEADE (protocole Meade
+   * révision 2010.10, cf. LX200CommandSet.pdf / driver INDI) :
+   * « East Longitudes are expressed as negative » — l'EST est NÉGATIF,
+   * l'OUEST positif (l'inverse de la convention cartographique de l'app).
+   * Paris (2,35° E) → "-002*21" ; New York (74° O) → "+074*00".
+   * v2.2.1 : l'app envoyait la valeur Est-positive brute ("+002*21" lu
+   * « 2°21' OUEST » par la raquette) — TSL décalé, pointage décalé en AD
+   * (sensation d'Est/Ouest inversés). 3 chiffres de degrés (DDD).
+   */
+  lonCmd(lonEastDeg: number): string {
+    const meade = -lonEastDeg; // Est-négatif (Meade)
+    const sign = meade < 0 ? '-' : '+';
+    const d = Math.abs(meade);
+    const deg = Math.floor(d);
+    const mr = Math.round((d - deg) * 60);
+    const mr2 = mr === 60 ? 0 : mr;
+    const dr2 = mr === 60 ? deg + 1 : deg;
+    return `${sign}${String(Math.min(360, dr2)).padStart(3, '0')}*${pad(mr2)}`;
+  },
 };
+
+/**
+ * Longitude MEADE (réponse :Gg# / paramètre :Sg#) → cartographique
+ * Est-positive (convention interne de l'app). Accepte les deux formes
+ * historiques de Meade, équivalentes modulo 360 :
+ *  - signée Est-négative (protocole 2010.10) : "-002*21" → −2.35 → +2.35 ;
+ *  - 0-360 Ouest-positive (LX200 classique)  : "357*39"  → 357.65 → +2.35.
+ * "+074*00" (74° O) → −74. Greenwich → 0.
+ */
+export function lonDegFromMeade(meadeVal: number): number {
+  const cart = -meadeVal;
+  return (((cart + 180) % 360) + 360) % 360 - 180;
+}
 
 /** DEC Meade : signe toujours présent, '*' entre degrés et minutes,
  *  secondes seulement en haute précision. */

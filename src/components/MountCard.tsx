@@ -2,15 +2,20 @@
  * Carte « Monture » (v2.2.0 — demande utilisateur : « dans l'onglet
  * alignement, je voudrais pouvoir détecter automatiquement la monture pour
  * appliquer les presets adéquats, et choisir une autre monture si elle est
- * mal détectée »).
+ * mal détectée » ; v2.2.1 — retour terrain : la raquette réglée « DS-114 »
+ * n'était ni détectable ni choisissable).
  *
  *  - DÉTECTION : relit :GVP#/:GVN# (autostar.detectFirmware) et propose le
- *    preset déduit de la raquette (suggestPresetForModel) ;
+ *    preset déduit de la raquette (suggestPresetForModel) — ATTENTION : la
+ *    raquette ne transmet PAS la monture choisie dans ses menus (Meade ne
+ *    l'expose pas en série), la détection n'est qu'une hypothèse, rappelé
+ *    à l'utilisateur (mx.notExposed) ;
  *  - PRESETS : butées d'élévation, taux attendus, jeu typique, mode
  *    d'alignement suggéré — utilisés par le diagnostic (garde des butées,
  *    base des ratios) et l'affichage ;
  *  - CORRECTION MANUELLE : l'utilisateur choisit la monture exacte
- *    (ETX-90/105/125, LX90, LX200, générique) si la détection se trompe.
+ *    (ETX-90/105/125, LX90, LX200, DS-114/série DS, générique) si la
+ *    détection se trompe — le choix manuel fait foi.
  */
 import {useState} from 'react';
 import {View, Text, TouchableOpacity} from 'react-native';
@@ -27,7 +32,7 @@ import {
 import {Card, Title, usePal, s} from './ui';
 
 const PRESET_ORDER: Array<MountPresetId | 'auto'> = [
-  'auto', 'etx90', 'etx105', 'etx125', 'lx90', 'lx200', 'generic',
+  'auto', 'etx90', 'etx105', 'etx125', 'lx90', 'lx200', 'ds114', 'generic',
 ];
 
 export function MountCard() {
@@ -86,6 +91,7 @@ export function MountCard() {
           </TouchableOpacity>
         ) : null}
       </View>
+      <Text style={{color: c.textFaint, fontSize: 11, marginTop: 5, lineHeight: 16}}>{mx.notExposed}</Text>
 
       <View style={[s.row, {marginTop: 8, flexWrap: 'wrap'}]}>
         {PRESET_ORDER.map((k) =>

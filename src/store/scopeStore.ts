@@ -19,7 +19,7 @@ export type HbHint = 'none' | 'wait' | 'mute' | 'init';
 
 export interface LogLine {
   ts: number;
-  dir: 'sent' | 'recv' | 'info' | 'error';
+  dir: 'sent' | 'recv' | 'info' | 'error' | 'warn';
   text: string;
 }
 

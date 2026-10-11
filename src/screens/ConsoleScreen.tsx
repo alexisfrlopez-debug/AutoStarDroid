@@ -15,7 +15,7 @@ export function ConsoleScreen() {
   const rows = useMemo(() => [...log].reverse(), [log]);
 
   const colorOf = (dir: string) =>
-    dir === 'sent' ? c.blue : dir === 'recv' ? c.green : dir === 'error' ? c.red : c.textDim;
+    dir === 'sent' ? c.blue : dir === 'recv' ? c.green : dir === 'error' ? c.red : dir === 'warn' ? c.amber : c.textDim;
 
   return (
     <View style={{flex: 1, backgroundColor: c.bg}}>
@@ -36,7 +36,7 @@ export function ConsoleScreen() {
               {new Date(item.ts).toLocaleTimeString()}
             </Text>
             <Text style={{color: colorOf(item.dir), fontFamily: 'monospace', fontSize: 12, width: 42, fontWeight: '700'}}>
-              {item.dir === 'sent' ? '>>>' : item.dir === 'recv' ? '<<<' : item.dir === 'error' ? 'ERR' : 'INF'}
+              {item.dir === 'sent' ? '>>>' : item.dir === 'recv' ? '<<<' : item.dir === 'error' ? 'ERR' : item.dir === 'warn' ? 'WRN' : 'INF'}
             </Text>
             <Text style={{color: c.text, fontFamily: 'monospace', fontSize: 12, flex: 1}}>{item.text}</Text>
           </View>

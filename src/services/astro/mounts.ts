@@ -20,7 +20,7 @@
 import type {ScopeModelId} from '../../store/settingsStore';
 
 export type MountPresetId =
-  | 'etx90' | 'etx105' | 'etx125' | 'lx90' | 'lx200' | 'generic';
+  | 'etx90' | 'etx105' | 'etx125' | 'lx90' | 'lx200' | 'ds114' | 'generic';
 
 export interface MountPreset {
   id: MountPresetId;
@@ -82,6 +82,21 @@ export const MOUNT_PRESETS: Record<MountPresetId, MountPreset> = {
     typicalBacklashArcsec: {ra: 20, dec: 45},
     altaz: false,
   },
+  /* Meade DS-114AT (monture d'origine des DS, entraînement servo à pignons —
+   * v2.2.1, demande utilisateur : « la raquette est réglée sur DS114 mais
+   * l'application ne détecte pas cette monture »). La raquette #49x NE
+   * TRANSMET PAS le choix de monture en série : ce preset est à choisir
+   * MANUELLEMENT dans la carte Monture. Courbe alt-az en fourche : butées
+   * larges ; pignons plus lents et plus jeux qu'un ETX (vis sans fin). */
+  ds114: {
+    id: 'ds114',
+    label: 'DS-114 / série DS',
+    minAltDeg: 0,
+    maxAltDeg: 88,
+    expectedRates: {center: 0.053, find: 2.0, slew: 3.5},
+    typicalBacklashArcsec: {ra: 120, dec: 180},
+    altaz: true,
+  },
   generic: {
     id: 'generic',
     label: 'Autre / générique',
@@ -99,6 +114,11 @@ export const MOUNT_PRESETS: Record<MountPresetId, MountPreset> = {
  * courant sur #497) propose ses butées prudentes ; Autostar II → LX200 ;
  * LX200 classique → LX200. Renvoie null si la raquette est inconnue :
  * l'app garde le preset « générique » (butées larges, rien de spécial).
+ * IMPORTANT (v2.2.1) : la monture RÉELLE n'est PAS transmise par la
+ * raquette (Meade n'expose pas le menu Telescope > Mount en série) —
+ * un #497 réglé « DS-114 » sur son clavier reste ici « ETX-125 ». La
+ * carte Monture le rappelle et propose le choix manuel DS-114 (entre
+ * autres) : c'est le choix manuel qui fait foi pour les presets.
  */
 export function suggestPresetForModel(model: ScopeModelId | null): MountPresetId {
   switch (model) {
