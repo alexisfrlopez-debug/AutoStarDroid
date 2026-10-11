@@ -11,6 +11,8 @@ import {BRIGHT_STARS} from '../services/catalog/stars';
 import {Btn, Card, Segmented, Title, usePal} from '../components/ui';
 import {StatusHeader} from '../components/StatusHeader';
 import {TelemetryAlign} from '../components/TelemetryAlign';
+import {TelemetryTracking} from '../components/TelemetryTracking';
+import {MotorCalib} from '../components/MotorCalib';
 
 type FlowStep = 'idle' | 'goto1' | 'center1' | 'sync1' | 'goto2' | 'center2' | 'sync2';
 
@@ -172,6 +174,12 @@ export function AlignScreen() {
 
       {/* Recalage précis par télémétrie du téléphone (gyroscope + boussole). */}
       <TelemetryAlign />
+
+      {/* Suivi télémétrique en boucle fermée (v2.0.0). */}
+      <TelemetryTracking />
+
+      {/* Auto-calibrage des moteurs par gyroscope (v2.0.0). */}
+      <MotorCalib />
     </ScrollView>
   );
 }

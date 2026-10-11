@@ -48,6 +48,14 @@ class SensorsModule(reactContext: ReactApplicationContext) :
   private val rotMatrix = FloatArray(9)
   private val ori = FloatArray(3)
 
+  // --- Gyroscope brut (v2.0.0) : taux angulaires instantanés (rad/s),
+  //     SANS le lissage du filtre de Kalman du rotation vector. Indispensable
+  //     au calibrage moteurs (mesure des taux réels, détection du backlash :
+  //     il faut voir le démarrage du mouvement, pas une moyenne lissée).
+  private var gyroListening = false
+  private var gyroIntervalMs = 50L
+  private var gyroLastEmit = 0L
+
   private val listener = object : SensorEventListener {
     override fun onSensorChanged(event: SensorEvent) {
       if (event.sensor.type != Sensor.TYPE_ROTATION_VECTOR) return
@@ -87,10 +95,30 @@ class SensorsModule(reactContext: ReactApplicationContext) :
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
   }
 
+  private val gyroListener = object : SensorEventListener {
+    override fun onSensorChanged(event: SensorEvent) {
+      if (event.sensor.type != Sensor.TYPE_GYROSCOPE) return
+      val now = System.currentTimeMillis()
+      if (now - gyroLastEmit < gyroIntervalMs) return
+      gyroLastEmit = now
+      val v = event.values
+      sendEvent("sensorsGyro", Arguments.createMap().apply {
+        putDouble("x", v[0].toDouble())
+        putDouble("y", v[1].toDouble())
+        putDouble("z", v[2].toDouble())
+        putDouble("accuracy", event.accuracy.toDouble())
+        putDouble("ts", now.toDouble())
+      })
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+  }
+
   override fun getName() = NAME
 
   override fun onCatalystInstanceDestroy() {
     stopListening()
+    stopGyroListening()
   }
 
   private fun sendEvent(name: String, params: WritableMap) {
@@ -150,5 +178,43 @@ class SensorsModule(reactContext: ReactApplicationContext) :
       sensorManager?.unregisterListener(listener)
     } catch (_: Exception) {}
     listening = false
+  }
+
+  /**
+   * Démarre le flux GYROSCOPE BRUT à la fréquence demandée (min ~20 ms).
+   * Événements « sensorsGyro » : x/y/z en rad/s (convention Android) + ts.
+   * Indépendant du flux d'orientation (inscription capteur séparée).
+   */
+  @ReactMethod
+  fun startGyro(intervalMs: Double, promise: Promise) {
+    try {
+      val sm = sensorManager
+      val g = sm?.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+      if (sm == null || g == null) {
+        promise.reject("NO_SENSOR", "Gyroscope unavailable")
+        return
+      }
+      stopGyroListening()
+      this.gyroIntervalMs = intervalMs.toLong().coerceAtLeast(20L)
+      gyroListening = true
+      sm.registerListener(gyroListener, g, SensorManager.SENSOR_DELAY_GAME)
+      promise.resolve(true)
+    } catch (e: Exception) {
+      promise.reject("SENSORS", e)
+    }
+  }
+
+  @ReactMethod
+  fun stopGyro(promise: Promise) {
+    stopGyroListening()
+    promise.resolve(true)
+  }
+
+  private fun stopGyroListening() {
+    if (!gyroListening) return
+    try {
+      sensorManager?.unregisterListener(gyroListener)
+    } catch (_: Exception) {}
+    gyroListening = false
   }
 }

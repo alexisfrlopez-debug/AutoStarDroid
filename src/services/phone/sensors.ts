@@ -43,6 +43,9 @@ const NativeSensors = NativeModules.NativeSensors as
       isAvailable(): Promise<SensorsAvailability>;
       startOrientation(intervalMs: number): Promise<boolean>;
       stopOrientation(): Promise<boolean>;
+      /** v2.0.0 — gyroscope brut (rad/s), pour le calibrage moteurs. */
+      startGyro(intervalMs: number): Promise<boolean>;
+      stopGyro(): Promise<boolean>;
     }
   | undefined;
 
@@ -85,6 +88,48 @@ export function startOrientation(cb: (o: Orientation) => void, intervalMs = 100)
     consumers = Math.max(0, consumers - 1);
     if (consumers === 0) {
       NativeSensors.stopOrientation().catch(() => undefined);
+    }
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* Gyroscope brut (v2.0.0) — calibrage moteurs                         */
+/* ------------------------------------------------------------------ */
+
+export interface GyroEvent {
+  /** rad/s, convention Android (axes téléphone). */
+  x: number;
+  y: number;
+  z: number;
+  accuracy: number;
+  ts: number;
+}
+
+/** Consommateurs du flux gyro (indépendant du flux d'orientation). */
+let gyroConsumers = 0;
+
+/**
+ * Démarre le flux gyroscope brut (20 Hz par défaut). Renvoie une fonction
+ * d'arrêt à appeler au démontage. Plusieurs consommateurs simultanés
+ * pris en charge (référence comptée, même mécanisme que l'orientation).
+ * Aucune fonction JS ne traverse le pont (règle de survie v1.7.2) :
+ * uniquement des nombres sérialisables dans l'événement natif.
+ */
+export function startGyro(cb: (g: GyroEvent) => void, intervalMs = 50): () => void {
+  if (!NativeSensors || !emitter) return () => undefined;
+  let stopped = false;
+  const sub = emitter.addListener('sensorsGyro', (g: GyroEvent) => {
+    if (!stopped) cb(g);
+  });
+  gyroConsumers += 1;
+  NativeSensors.startGyro(intervalMs).catch(() => undefined);
+  return () => {
+    if (stopped) return;
+    stopped = true;
+    sub.remove();
+    gyroConsumers = Math.max(0, gyroConsumers - 1);
+    if (gyroConsumers === 0) {
+      NativeSensors.stopGyro().catch(() => undefined);
     }
   };
 }

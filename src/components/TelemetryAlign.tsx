@@ -21,9 +21,10 @@ import {useSettingsStore} from '../store/settingsStore';
 import {useScopeStore} from '../store/scopeStore';
 import {useTelemetryStore, telemetryFitOf} from '../store/telemetryStore';
 import {autostar} from '../services/protocol/client';
-import {BRIGHT_STARS, withAlt} from '../services/catalog';
+import {BRIGHT_STARS, withAlt, searchAll, planetObjects, type DisplayObject} from '../services/catalog';
 import {raDecToAltAz, altAzToRaDec, separationDeg} from '../services/astro/coords';
 import {raDegToHMS, decDegToDMS} from '../services/astro/time';
+import {useTrackingStore} from '../store/trackingStore';
 import {
   applyFit,
   averageQuat,
@@ -54,8 +55,9 @@ export function TelemetryAlign() {
   const removePoint = useTelemetryStore((st) => st.removePoint);
   const clearPoints = useTelemetryStore((st) => st.clearPoints);
 
-  const [pick, setPick] = useState<'stars' | 'manual'>('stars');
-  const [starId, setStarId] = useState<string | null>(null);
+  const [pick, setPick] = useState<'catalog' | 'manual'>('catalog');
+  const [selId, setSelId] = useState<string | null>(null);
+  const [query, setQuery] = useState('');
   const [raTxt, setRaTxt] = useState('');
   const [decTxt, setDecTxt] = useState('');
   const [syncAfter, setSyncAfter] = useState(true);
@@ -97,18 +99,22 @@ export function TelemetryAlign() {
   }, []);
 
   const now = useMemo(() => new Date(), [tick]);
-  const nowMin = useMemo(() => Math.floor(now.getTime() / 60000), [tick]);
 
   const fit = useMemo(() => telemetryFitOf(points), [points]);
 
-  /** Étoiles brillantes au-dessus de 15° (rafraîchi à la minute). */
-  const stars = useMemo(() => {
-    const d = new Date(nowMin * 60000);
-    return withAlt(BRIGHT_STARS, site.latDeg, site.lonDeg, d)
+  /** Catalogue complet : planètes/Lune/Soleil + recherche (Messier, NGC,
+   *  étoiles) — v2.0.0. Sans requête : objets brillants du moment. */
+  const results = useMemo(() => {
+    if (query.trim()) {
+      return withAlt(searchAll(query), site.latDeg, site.lonDeg, now);
+    }
+    const planets = planetObjects(site.latDeg, site.lonDeg, now, t);
+    const stars = withAlt(BRIGHT_STARS, site.latDeg, site.lonDeg, now)
       .filter((o) => o.altDeg > 15)
       .sort((a, b) => a.mag - b.mag)
-      .slice(0, 15);
-  }, [site.latDeg, site.lonDeg, nowMin]);
+      .slice(0, 12);
+    return [...planets.filter((p) => p.altDeg > 0), ...stars];
+  }, [query, site.latDeg, site.lonDeg, now, t]);
 
   const manual = useMemo(() => {
     const ra = parseRaHms(raTxt);
@@ -116,23 +122,36 @@ export function TelemetryAlign() {
     return ra != null && dec != null ? {raDeg: ra, decDeg: dec} : null;
   }, [raTxt, decTxt]);
 
-  /** Objet sélectionné : nom, coordonnées J2000, direction horizontale actuelle. */
+  /** Objet sélectionné : nom, coordonnées (recalculées si planète), alt/az. */
   const selected = useMemo(() => {
-    if (pick === 'stars') {
-      const st = stars.find((o) => o.id === starId);
-      return st
-        ? {name: st.name, raDeg: st.raDeg, decDeg: st.decDeg, altDeg: st.altDeg, azDeg: st.azDeg}
-        : null;
+    if (pick === 'catalog') {
+      const o = results.find((r) => r.id === selId) as DisplayObject | undefined;
+      if (!o) return null;
+      return {id: o.id, name: o.name, raDeg: o.raDeg, decDeg: o.decDeg, altDeg: o.altDeg, azDeg: o.azDeg};
     }
     if (!manual) return null;
     const aa = raDecToAltAz(manual.raDeg, manual.decDeg, site.latDeg, site.lonDeg, now);
     return {
+      id: null as string | null,
       name: `${raDegToHMS(manual.raDeg)} ${decDegToDMS(manual.decDeg)}`,
       ...manual,
       altDeg: aa.altDeg,
       azDeg: aa.azDeg,
     };
-  }, [pick, starId, stars, manual, site.latDeg, site.lonDeg, now]);
+  }, [pick, selId, results, manual, site.latDeg, site.lonDeg, now]);
+
+  /** Sélection → cible partagée du suivi télémétrique (objet mobile reconnu
+   *  par l'id PLANET_* du catalogue). */
+  const choose = (o: DisplayObject) => {
+    setSelId(o.id);
+    useTrackingStore.getState().setTarget({
+      name: o.name,
+      raDeg: o.raDeg,
+      decDeg: o.decDeg,
+      moving: o.id.startsWith('PLANET_') ? o.id.slice(7) : null,
+      from: 'catalog',
+    });
+  };
 
   /** Pointage réel du télescope déduit des capteurs (fit) + position raquette. */
   const live = useMemo(() => {
@@ -262,27 +281,44 @@ export function TelemetryAlign() {
 
       {/* Choix de l'objet */}
       <Text style={{color: c.textDim, fontSize: 12, marginTop: 12, marginBottom: 6}}>{t.align.telem.pick}</Text>
-      <Segmented<'stars' | 'manual'>
+      <Segmented<'catalog' | 'manual'>
         value={pick}
         onChange={setPick}
         options={[
-          {key: 'stars', label: t.align.telem.pickStars},
+          {key: 'catalog', label: t.align.telem.pickCatalog},
           {key: 'manual', label: t.align.telem.pickManual},
         ]}
       />
-      {pick === 'stars' ? (
+      {pick === 'catalog' ? (
         <View style={{marginTop: 4}}>
-          {stars.map((st) => (
-            <TouchableOpacity
-              key={st.id}
-              onPress={() => setStarId(st.id)}
-              style={[s.row, s.between, {paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: c.border}]}>
-              <Text style={{color: starId === st.id ? c.amber : c.text, fontWeight: '600', fontSize: 14}}>{st.name}</Text>
-              <Text style={{color: c.textFaint, fontSize: 12}}>
-                {st.altDeg.toFixed(0)}° · mag {st.mag.toFixed(1)}
-              </Text>
-            </TouchableOpacity>
-          ))}
+          <Input
+            value={query}
+            onChangeText={setQuery}
+            label={t.align.telem.search}
+            placeholder="M42, Jupiter, Vega…"
+            autoCapitalize="none"
+          />
+          <View style={{maxHeight: 260}}>
+            <View style={{flexDirection: 'row', flexWrap: 'wrap', marginBottom: 4}}>
+              {results.map((o) => (
+                <TouchableOpacity
+                  key={o.id}
+                  onPress={() => choose(o)}
+                  style={{
+                    backgroundColor: selId === o.id ? c.amber : c.bgPanel2,
+                    borderWidth: 1, borderColor: c.border, borderRadius: 14,
+                    paddingHorizontal: 10, paddingVertical: 5, marginRight: 6, marginBottom: 6,
+                  }}>
+                  <Text style={{color: selId === o.id ? '#111' : c.text, fontSize: 12, fontWeight: '600'}}>
+                    {o.name} {o.altDeg > 0 ? `${o.altDeg.toFixed(0)}°` : '—'}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            {results.length === 0 ? (
+              <Text style={{color: c.textFaint, fontSize: 12}}>{t.align.telem.noResult}</Text>
+            ) : null}
+          </View>
         </View>
       ) : (
         <View style={{marginTop: 4}}>
