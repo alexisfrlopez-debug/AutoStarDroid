@@ -311,6 +311,9 @@ export const fr: Dict = {
     timeout: 'Délai dépassé — pas de réponse de la raquette',
     notConnected: 'Non connecté',
     transport: 'Erreur de liaison',
-    refused: 'Connexion refusée',
+    refused: 'Refusé par la raquette (vérifiez son mode, puis réessayez)',
+    gotoNoLink: 'Raquette déconnectée — la liaison a été perdue, reconnectez le télescope',
+    gotoMute: 'La raquette ne répond pas — vérifiez le câble/la liaison, appuyez MODE sur la raquette, puis réessayez (le GOTO a peut-être démarré)',
+    syncRefused: 'Synchronisation refusée — la raquette n’a pas accepté les coordonnées',
   },
 };

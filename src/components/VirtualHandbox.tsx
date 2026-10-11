@@ -51,7 +51,7 @@ import {useEffect, useMemo, useRef, useState} from 'react';
 import {Pressable, Text, View, Vibration} from 'react-native';
 import {useT} from '../i18n';
 import {useSettingsStore} from '../store/settingsStore';
-import {autostar, type Dir, HB_KEYS, hbDigitKey, LCD_STALE_MS} from '../services/protocol/client';
+import {autostar, gotoErrorText, type Dir, HB_KEYS, hbDigitKey, LCD_STALE_MS} from '../services/protocol/client';
 import {handboxSync} from '../services/protocol/handboxSync';
 import {tts} from '../services/phone/tts';
 import {useScopeStore, type HbHint} from '../store/scopeStore';
@@ -219,7 +219,10 @@ export function VirtualHandbox() {
         useScopeStore.getState().setTarget(raDeg, decDeg, name);
         showMsg(`${(name || 'OK').slice(0, 12)} OK`, 4000);
       } else {
-        showMsg(r === 'belowHorizon' ? t.objects.belowHorizon : t.hb.msgs.noObject, 4000);
+        showMsg(gotoErrorText(r, {
+          belowHorizon: t.objects.belowHorizon, empty: t.hb.msgs.noObject,
+          gotoNoLink: t.errors.gotoNoLink, gotoMute: t.errors.gotoMute, refused: t.errors.refused,
+        }), 4000);
       }
     } catch (e) {
       showMsg((e as Error).message, 4000);

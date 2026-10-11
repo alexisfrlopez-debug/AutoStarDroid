@@ -4,7 +4,7 @@ import {ScrollView, View, Text, Alert} from 'react-native';
 import {useT} from '../i18n';
 import {useScopeStore} from '../store/scopeStore';
 import {useSettingsStore} from '../store/settingsStore';
-import {autostar} from '../services/protocol/client';
+import {autostar, gotoErrorText} from '../services/protocol/client';
 import {raDecToAltAz} from '../services/astro/coords';
 import {raDegToHMS, decDegToDMS, lstDeg} from '../services/astro/time';
 import {StatusHeader} from '../components/StatusHeader';
@@ -33,10 +33,11 @@ export function MainScreen({navigation}: {navigation: {navigate: (s: string) => 
     if (targetRaDeg === null || targetDecDeg === null) return;
     try {
       const r = await autostar.gotoRaDec(targetRaDeg, targetDecDeg);
-      if (r !== 'ok') {
-        Alert.alert(t.common.error,
-          r === 'belowHorizon' ? t.objects.belowHorizon : r === 'noObject' ? t.objects.empty : t.errors.refused);
-      }
+      const msg = gotoErrorText(r, {
+        belowHorizon: t.objects.belowHorizon, empty: t.objects.empty,
+        gotoNoLink: t.errors.gotoNoLink, gotoMute: t.errors.gotoMute, refused: t.errors.refused,
+      });
+      if (msg) Alert.alert(t.common.error, msg);
     } catch (e) {
       Alert.alert(t.common.error, (e as Error).message);
     }

@@ -5,7 +5,7 @@ import {ScrollView, Text, TouchableOpacity, Alert} from 'react-native';
 import {useT} from '../i18n';
 import {useSettingsStore} from '../store/settingsStore';
 import {useScopeStore} from '../store/scopeStore';
-import {autostar} from '../services/protocol/client';
+import {autostar, gotoErrorText} from '../services/protocol/client';
 import {withAlt, DisplayObject} from '../services/catalog';
 import {BRIGHT_STARS} from '../services/catalog/stars';
 import {Btn, Card, Segmented, Title, usePal} from '../components/ui';
@@ -64,7 +64,10 @@ export function AlignScreen() {
     try {
       const r = await autostar.gotoRaDec(s.raDeg, s.decDeg);
       if (r !== 'ok') {
-        Alert.alert(t.common.error, r === 'belowHorizon' ? t.objects.belowHorizon : t.errors.refused);
+        Alert.alert(t.common.error, gotoErrorText(r, {
+          belowHorizon: t.objects.belowHorizon, empty: t.objects.empty,
+          gotoNoLink: t.errors.gotoNoLink, gotoMute: t.errors.gotoMute, refused: t.errors.refused,
+        }));
         return;
       }
       if (step === 'goto1') setStep('center1');

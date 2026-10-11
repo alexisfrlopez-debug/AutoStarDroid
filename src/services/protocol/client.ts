@@ -19,6 +19,30 @@ export type Speed = keyof typeof SPEED_CMDS;
 
 export interface RaDec {raDeg: number; decDeg: number}
 
+/** Résultat d'un GOTO (v2.0.1) — voir AutostarClient.gotoRaDec. */
+export type GotoStatus = 'ok' | 'belowHorizon' | 'noObject' | 'refused' | 'mute' | 'noLink';
+
+/** Textes i18n nécessaires pour traduire un statut de GOTO. */
+export interface GotoErrorTexts {
+  belowHorizon: string;
+  empty: string;
+  gotoNoLink: string;
+  gotoMute: string;
+  refused: string;
+}
+
+/** Message localisé pour un statut de GOTO — partagé par tous les écrans
+ *  (v2.0.1 : chaque cause a SON message : liaison morte, raquette muette,
+ *  refus protocolaire — au lieu d'un « Connexion refusée » fourre-tout). */
+export function gotoErrorText(r: GotoStatus, x: GotoErrorTexts): string {
+  if (r === 'ok') return '';
+  return r === 'belowHorizon' ? x.belowHorizon
+    : r === 'noObject' ? x.empty
+    : r === 'noLink' ? x.gotoNoLink
+    : r === 'mute' ? x.gotoMute
+    : x.refused;
+}
+
 /**
  * MIROIR LCD (v1.8.1) — le LCD de la raquette VIRTUELLE affiche le LITTÉRAL
  * de l'écran de la raquette PHYSIQUE, relu en continu par :ED# (extension
@@ -196,20 +220,7 @@ export class AutostarClient {
     transport.onError((msg) => {
       this.log('error', msg);
     });
-    transport.onClosed(() => {
-      this.stopPoll();
-      const s = useScopeStore.getState();
-      s.setConnStatus('disconnected');
-      s.setFirmware(null, null, null);
-      s.setHasPos(false);
-      s.setHbMoving(false);
-      s.setHbExternal(false);
-      s.setHbDirs(null);
-      s.setHbSlewFast(false);
-      s.setHbHint('none');
-      s.pushLog('info', 'Liaison fermée');
-      handboxSync.reset();
-    });
+    transport.onClosed(() => this.handleLinkClosed());
     try {
       await transport.connect(opts);
     } catch (e) {
@@ -303,6 +314,26 @@ export class AutostarClient {
     s.setTransportType(null);
     s.setFirmware(null, null, null);
     s.setHbHint('none');
+  }
+
+  /** Liaison perdue constatée EN COURS D'UTILISATION (écriture impossible,
+   *  transport mort — ex. câble USB retiré sans événement usbDetached, socket
+   *  TCP/BT coupé sans onClosed) : même nettoyage que la fermeture transport,
+   *  l'état « connected » du store ne doit jamais rester un fantôme. (v2.0.1) */
+  private handleLinkClosed() {
+    if (useScopeStore.getState().connStatus === 'disconnected') return; // déjà fait
+    this.stopPoll();
+    const s = useScopeStore.getState();
+    s.setConnStatus('disconnected');
+    s.setFirmware(null, null, null);
+    s.setHasPos(false);
+    s.setHbMoving(false);
+    s.setHbExternal(false);
+    s.setHbDirs(null);
+    s.setHbSlewFast(false);
+    s.setHbHint('none');
+    s.pushLog('error', 'Liaison perdue — reconnectez la raquette');
+    handboxSync.reset();
   }
 
   /* ---------- couche basse ---------- */
@@ -489,38 +520,121 @@ export class AutostarClient {
     this.ownMoveUntil = Date.now() + 1200;
   }
 
-  /** GOTO vers RA/Dec. Renvoie 'ok' ou un message d'erreur localisé.
+  /** Pose la cible (:Sr OU :Sd) avec la ROBUSTESSE complète (v2.0.1) :
+   *  - refus explicite ("0") → l'AUTRE précision est essayée (v1.8.1) ;
+   *  - AUCUNE réponse (délai dépassé) → la raquette est muette : reset du
+   *    parseur par ESC ESC (même séquence que la connexion) puis UNE
+   *    retentative du même format — l'échec muet n'est pas une histoire de
+   *    format, inutile d'insister sur l'autre précision ;
+   *  - écriture impossible / transport mort → 'noLink' + état de connexion
+   *    remis à zéro (fini le « connected » fantôme après un câble retiré).
+   *  Renvoie '1' (accepté), '0' (refus EXPLICITE de la raquette),
+   *  'mute' (toujours muette après reset) ou 'noLink'. */
+  private async setTargetBit(prefix: string, formats: string[]): Promise<'1' | '0' | 'mute' | 'noLink'> {
+    let explicitRefused = false;
+    for (const f of formats) {
+      const full = `${prefix}${f}#`;
+      let r: string;
+      try {
+        r = await this.cmd(full, 2500, VALID.bit);
+      } catch (_) {
+        if (!this.transport?.isConnected()) {
+          this.handleLinkClosed();
+          return 'noLink';
+        }
+        // muette : reset parseur (ESC ESC) puis UNE retentative
+        try {await this.transport.write('\x1b\x1b'); await sleep(350);} catch (_) {}
+        try {
+          r = await this.cmd(full, 2500, VALID.bit);
+        } catch (_) {
+          if (!this.transport?.isConnected()) {
+            this.handleLinkClosed();
+            return 'noLink';
+          }
+          return 'mute'; // raquette muette même après reset — pas un problème de format
+        }
+      }
+      if (r === '1') return '1';
+      explicitRefused = true; // « 0 » explicite : la raquette VIT et refuse → autre précision
+    }
+    return explicitRefused ? '0' : 'mute';
+  }
+
+  /** :MS muet — le GOTO a PEUT-ÊTRE démarré quand même (raquettes qui
+   *  n'accusent pas réception avant de slewer). Sonde :D# (barre "|" pendant
+   *  le moteur, vide à l'arrêt — spec Autostar) : "|" → le slew EST parti.
+   *  ~4 s max, tolérante aux cycles muets pendant le moteur. */
+  private async probeSlewStarted(tries = 4): Promise<boolean> {
+    for (let i = 0; i < tries; i++) {
+      await sleep(700);
+      if (!this.isConnected()) return false;
+      try {
+        const d = await this.cmd(':D#', 1500);
+        if (d.includes('|')) return true; // monture EN MOUVEMENT : le GOTO est parti
+        if (d === '') return false; // monture À L'ARRÊT : :MS est resté sans effet
+      } catch (_) { /* muette ce cycle : on retente */ }
+    }
+    return false;
+  }
+
+  /** GOTO vers RA/Dec. Renvoie un statut FIN (v2.0.1) :
+   *  'ok'          — slew parti (ou confirmé parti par sonde :D#) ;
+   *  'belowHorizon'— :MS = 1 (objet sous l'horizon) ;
+   *  'noObject'    — :MS = 2 (objet introuvable/range) ;
+   *  'refused'     — REFUS EXPLICITE de la raquette (:Sr/:Sd = 0 dans les
+   *                  deux précisions, ou :MS code inattendu) ;
+   *  'mute'        — raquette muette (aucune réponse, même après ESC ESC) —
+   *                  le GOTO a peut-être malgré tout démarré (sondé par :D#) ;
+   *  'noLink'      — liaison morte (écriture impossible) : état remis à zéro,
+   *                  il faut se reconnecter.
    *  ROBUSTESSE (v1.8.1) : le format des coordonnées dépend du mode de
    *  précision de la raquette (haute "HH:MM:SS"/"sDD*MM:SS", basse
    *  "HH:MM.T"/"sDD*MM") — un format refusé ("0") est retenté dans
    *  l'autre précision AVANT de renoncer : un GO TO ne doit jamais échouer
    *  pour une histoire de format. La fin du slew est suivie par :D#
    *  (barre "|" pendant le moteur, chaîne vide à l'arrivée — spec Autostar). */
-  async gotoRaDec(raDeg: number, decDeg: number): Promise<'ok' | 'belowHorizon' | 'noObject' | 'refused'> {
+  async gotoRaDec(raDeg: number, decDeg: number): Promise<GotoStatus> {
     this.bump();
-    const raFormats = [proto.raCmd(raDeg), proto.raCmdLow(raDeg)];
-    const decFormats = [proto.decCmdHigh(decDeg), proto.decCmd(decDeg)];
-    let r1 = '0';
-    for (const f of raFormats) {
-      r1 = await this.cmd(`:Sr${f}#`, 2500, VALID.bit).catch(() => '0');
-      if (r1 === '1') break;
+    const r1 = await this.setTargetBit(':Sr', [proto.raCmd(raDeg), proto.raCmdLow(raDeg)]);
+    if (r1 !== '1') {
+      this.log('error', `GO TO : AD refusée par la raquette (${
+        r1 === '0' ? ':Sr = 0, les 2 précisions' : r1 === 'mute' ? 'aucune réponse, même après ESC ESC' : 'liaison morte'})`);
+      return r1 === '0' ? 'refused' : r1;
     }
-    if (r1 !== '1') return 'refused';
-    let r2 = '0';
-    for (const f of decFormats) {
-      r2 = await this.cmd(`:Sd${f}#`, 2500, VALID.bit).catch(() => '0');
-      if (r2 === '1') break;
+    const r2 = await this.setTargetBit(':Sd', [proto.decCmdHigh(decDeg), proto.decCmd(decDeg)]);
+    if (r2 !== '1') {
+      this.log('error', `GO TO : DEC refusée par la raquette (${
+        r2 === '0' ? ':Sd = 0, les 2 précisions' : r2 === 'mute' ? 'aucune réponse, même après ESC ESC' : 'liaison morte'})`);
+      return r2 === '0' ? 'refused' : r2;
     }
-    if (r2 !== '1') return 'refused';
-    const ms = await this.cmd(':MS#', 5000, VALID.digit).catch(() => '');
-    this.ownMoveUntil = Date.now() + 45000; // GOTO : slew possiblement long
-    if (ms !== '0') {
-      if (ms === '1') return 'belowHorizon';
-      if (ms === '2') return 'noObject';
-      return 'refused'; // muette/NACK — le GO TO peut malgré tout partir
+    let ms = '';
+    try {
+      ms = await this.cmd(':MS#', 5000, VALID.digit);
+    } catch (_) {
+      if (!this.transport?.isConnected()) {
+        this.handleLinkClosed();
+        return 'noLink';
+      }
+      // :MS muet — le slew a peut-être démarré : on SONDE :D# avant d'échouer
+      this.log('info', 'GO TO : :MS sans réponse — sonde :D# (slew parti ?)');
+      if (await this.probeSlewStarted()) {
+        this.log('info', 'GO TO : monture en mouvement détectée — slew confirmé parti');
+        this.ownMoveUntil = Date.now() + 45000;
+        this.watchSlewEnd();
+        return 'ok';
+      }
+      this.log('error', 'GO TO : raquette muette (:MS et :D# sans réponse) — vérifiez la liaison, appuyez MODE sur la raquette puis réessayez');
+      return 'mute';
     }
-    this.watchSlewEnd();
-    return 'ok';
+    if (ms === '0') {
+      this.ownMoveUntil = Date.now() + 45000; // GOTO : slew possiblement long
+      this.watchSlewEnd();
+      return 'ok';
+    }
+    if (ms === '1') return 'belowHorizon';
+    if (ms === '2') return 'noObject';
+    this.log('error', `GO TO : :MS réponse inattendue « ${ms} »`);
+    return 'refused';
   }
 
   /** Suit la fin du GOTO par :D# ("|" pendant le moteur, vide à l'arrivée).
@@ -553,24 +667,21 @@ export class AutostarClient {
    * SYNC sur des coordonnées données (v1.9.0, recalage télémétrie) :
    * :Sr/:Sd posent la cible puis :CM# déclare la position physique courante
    * = ces coordonnées. Met à jour l'alignement INTERNE de l'Autostar sans
-   * GOTO. Renvoie false si la raquette refuse :Sr ou :Sd.
+   * GOTO. Renvoie false si la raquette refuse :Sr/:Sd (explicitement ou par
+   * mutisme — la même robustesse que le GOTO v2.0.1 s'applique).
    */
   async syncRaDec(raDeg: number, decDeg: number): Promise<boolean> {
     this.bump();
-    const raFormats = [proto.raCmd(raDeg), proto.raCmdLow(raDeg)];
-    const decFormats = [proto.decCmdHigh(decDeg), proto.decCmd(decDeg)];
-    let r1 = '0';
-    for (const f of raFormats) {
-      r1 = await this.cmd(`:Sr${f}#`, 2500, VALID.bit).catch(() => '0');
-      if (r1 === '1') break;
+    const r1 = await this.setTargetBit(':Sr', [proto.raCmd(raDeg), proto.raCmdLow(raDeg)]);
+    if (r1 !== '1') {
+      this.log('error', `SYNC : AD refusée (${r1 === '0' ? ':Sr = 0' : r1 === 'mute' ? 'raquette muette' : 'liaison morte'})`);
+      return false;
     }
-    if (r1 !== '1') return false;
-    let r2 = '0';
-    for (const f of decFormats) {
-      r2 = await this.cmd(`:Sd${f}#`, 2500, VALID.bit).catch(() => '0');
-      if (r2 === '1') break;
+    const r2 = await this.setTargetBit(':Sd', [proto.decCmdHigh(decDeg), proto.decCmd(decDeg)]);
+    if (r2 !== '1') {
+      this.log('error', `SYNC : DEC refusée (${r2 === '0' ? ':Sd = 0' : r2 === 'mute' ? 'raquette muette' : 'liaison morte'})`);
+      return false;
     }
-    if (r2 !== '1') return false;
     await this.cmdSilent(':CM#');
     return true;
   }

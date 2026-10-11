@@ -4,7 +4,7 @@ import {FlatList, Modal, Text, TextInput, TouchableOpacity, View, Alert} from 'r
 import {useT} from '../i18n';
 import {useSettingsStore} from '../store/settingsStore';
 import {useScopeStore} from '../store/scopeStore';
-import {autostar} from '../services/protocol/client';
+import {autostar, gotoErrorText} from '../services/protocol/client';
 import {raDecToAltAz} from '../services/astro/coords';
 import {raDegToHMS, decDegToDMS} from '../services/astro/time';
 import {MESSIER, NGC_FAMOUS, BRIGHT_STARS, planetObjects, tourOfSky, searchAll, DisplayObject} from '../services/catalog';
@@ -75,10 +75,11 @@ export function ObjectScreen({navigation}: {navigation: {navigate: (s: string) =
     try {
       if (mode === 'goto') {
         const r = await autostar.gotoRaDec(o.raDeg, o.decDeg);
-        if (r !== 'ok') {
-          Alert.alert(t.common.error,
-            r === 'belowHorizon' ? t.objects.belowHorizon : r === 'noObject' ? t.objects.empty : t.errors.refused);
-        }
+        const msg = gotoErrorText(r, {
+          belowHorizon: t.objects.belowHorizon, empty: t.objects.empty,
+          gotoNoLink: t.errors.gotoNoLink, gotoMute: t.errors.gotoMute, refused: t.errors.refused,
+        });
+        if (msg) Alert.alert(t.common.error, msg);
       } else {
         // SYNC : GOTO fin puis CM sur l'objet déjà centré ? Non : SET cible puis l'utilisateur centre.
         Alert.alert(o.name, t.objects.set);

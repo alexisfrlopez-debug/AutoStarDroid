@@ -309,7 +309,10 @@ export const en = {
     timeout: 'Timeout — no answer from handbox',
     notConnected: 'Not connected',
     transport: 'Link error',
-    refused: 'Connection refused',
+    refused: 'Refused by the handbox (check its mode, then retry)',
+    gotoNoLink: 'Handbox disconnected — the link was lost, reconnect the telescope',
+    gotoMute: 'The handbox does not respond — check the cable/link, press MODE on the handbox, then retry (the GOTO may have started)',
+    syncRefused: 'Sync refused — the handbox did not accept the coordinates',
   },
 };
 export type Dict = typeof en;

@@ -10,7 +10,7 @@ import {useSettingsStore} from '../store/settingsStore';
 import {useScopeStore} from '../store/scopeStore';
 import {useTrackingStore, type TrackTarget} from '../store/trackingStore';
 import {telemetryFitOf, useTelemetryStore} from '../store/telemetryStore';
-import {autostar} from '../services/protocol/client';
+import {autostar, gotoErrorText} from '../services/protocol/client';
 import {telemetryTracker} from '../services/tracking/tracker';
 import {planetObjects as planetList} from '../services/catalog';
 import {planetRaDec, type PlanetName} from '../services/astro/planets';
@@ -96,12 +96,11 @@ export function TelemetryTracking() {
     setBusy(true);
     try {
       const r = await autostar.gotoRaDec(targetNow.raDeg, targetNow.decDeg);
-      if (r !== 'ok') {
-        Alert.alert(
-          t.common.error,
-          r === 'belowHorizon' ? t.objects.belowHorizon : r === 'noObject' ? t.objects.empty : t.errors.refused,
-        );
-      }
+      const msg = gotoErrorText(r, {
+        belowHorizon: t.objects.belowHorizon, empty: t.objects.empty,
+        gotoNoLink: t.errors.gotoNoLink, gotoMute: t.errors.gotoMute, refused: t.errors.refused,
+      });
+      if (msg) Alert.alert(t.common.error, msg);
     } catch (e) {
       Alert.alert(t.common.error, (e as Error).message);
     } finally {
@@ -161,7 +160,7 @@ export function TelemetryTracking() {
     setBusy(true);
     try {
       const ok = await autostar.syncRaDec(targetNow.raDeg, targetNow.decDeg);
-      Alert.alert(ok ? t.common.success : t.common.error, ok ? t.align.track.synced : t.errors.refused);
+      Alert.alert(ok ? t.common.success : t.common.error, ok ? t.align.track.synced : t.errors.syncRefused);
     } catch (e) {
       Alert.alert(t.common.error, (e as Error).message);
     } finally {
