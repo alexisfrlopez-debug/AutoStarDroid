@@ -17,41 +17,44 @@
  */
 import {useEffect, useRef, useState} from 'react';
 import {
-  View, Text, Image, TouchableOpacity, PermissionsAndroid, Platform, ActivityIndicator,
+  View, Text, Image, TouchableOpacity, PermissionsAndroid, Platform, ActivityIndicator, ScrollView,
 } from 'react-native';
 import {useT} from '../i18n';
 import {useSettingsStore} from '../store/settingsStore';
 import {useCameraStore} from '../store/cameraStore';
 import {useScopeStore} from '../store/scopeStore';
 import {
-  astroCamera, type CameraRanges, type ManualParams,
+  astroCamera, type CameraRanges, type ManualParams, type OpenOpts,
 } from '../services/phone/astroCamera';
 import {
-  acquisitionRunner, buildPlan,
+  acquisitionRunner, buildPlan, captureCalibFrames,
   type AcqKind, type AcqQuality, type AcqProgress,
 } from '../services/astro/acquisition';
 import {
   guidingRunner, calibrateGuiding, type GuidingAxes,
 } from '../services/astro/guiding';
+import {activeFilterKeys, type FilterPlan} from '../services/astro/filters';
 import {StatusHeader} from '../components/StatusHeader';
 import {Btn, Card, Segmented, Toggle, Title, usePal, s} from '../components/ui';
 import {SliderBar} from '../components/SliderBar';
-import {Dropdown} from '../components/Dropdown';
+import {Dropdown, type DropdownOption} from '../components/Dropdown';
 
-/** Aperçu : consomme le flux à part (throttle 150 ms) pour ne pas
- *  relancer tout l'écran à chaque frame. */
+/** Aperçu : consomme le flux à part (throttle = cadence d'affichage
+ *  choisie — v2.8.0) pour ne pas relancer tout l'écran à chaque frame. */
 function Preview() {
   const c = usePal();
+  const displayFps = useCameraStore((st) => st.displayFps);
   const [uri, setUri] = useState<string | null>(null);
   const lastTs = useRef(0);
+  const minGap = Math.max(33, Math.round(1000 / Math.max(2, displayFps)));
   useEffect(() => {
     const rel = astroCamera.onFrame((f) => {
-      if (f.ts - lastTs.current < 150) return;
+      if (f.ts - lastTs.current < minGap) return;
       lastTs.current = f.ts;
       setUri(`data:image/jpeg;base64,${f.data}`);
     });
     return rel;
-  }, []);
+  }, [minGap]);
   return (
     <View style={{
       borderRadius: 12, overflow: 'hidden', borderWidth: 1, borderColor: c.border,
@@ -260,6 +263,207 @@ function ParamsPanel({cameraId, streaming}: {cameraId: string | null; streaming:
   );
 }
 
+/**
+ * PANNEAU « RÉSOLUTION & CADENCE » (v2.8.0 — « choisir la résolution,
+ * fréquence d'affichage, framerate etc ») : listes lues du MATÉRIEL —
+ *  - UVC : formats + frames + intervalles exacts des descripteurs
+ *    (getUvcRanges) — le changement relance le flux via openUvcStreamEx ;
+ *  - Camera2 : tailles YUV (relance du flux) et plages AE cibles (fps
+ *    appliqués AU CAPTEUR en direct via setParams2 fpsMin/fpsMax) ;
+ *  - cadence d'AFFICHAGE de l'aperçu (throttle JS, indépendant du capteur).
+ */
+function FluxPanel({cameraId, streaming, onRestart}: {
+  cameraId: string | null; streaming: boolean;
+  onRestart: (opts: OpenOpts) => void;
+}) {
+  const t = useT();
+  const c = usePal();
+  const cam = useCameraStore();
+  const [ranges, setRanges] = useState<CameraRanges | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    if (streaming && cameraId) {
+      astroCamera.getRanges(cameraId).then((r) => { if (alive) setRanges(r); });
+    } else {
+      setRanges(null);
+    }
+    return () => { alive = false; };
+  }, [cameraId, streaming]);
+
+  if (!streaming) return null;
+  const isUvc = ranges?.source === 'uvc';
+
+  const resOptions: DropdownOption[] = isUvc
+    ? (ranges?.formats ?? []).flatMap((f) => f.frames.map((fr) => ({
+        key: `${f.index}:${fr.index}`,
+        label: `${f.label} · ${fr.w}×${fr.h}`,
+        hint: fr.fpsOptions.length ? `≤ ${Math.max(...fr.fpsOptions.map((o) => o.fps))} fps` : undefined,
+      })))
+    : (ranges?.sizes ?? []).map((sz) => ({key: `${sz.w}x${sz.h}`, label: `${sz.w}×${sz.h}`}));
+  const resValue = isUvc
+    ? (cam.uvcFormatIndex != null && cam.uvcFrameIndex != null
+        ? `${cam.uvcFormatIndex}:${cam.uvcFrameIndex}` : null)
+    : `${cam.prefWidth}x${cam.prefHeight}`;
+
+  const selFormat = (ranges?.formats ?? []).find((f) => f.index === cam.uvcFormatIndex);
+  const selFrame = selFormat?.frames.find((fr) => fr.index === cam.uvcFrameIndex);
+  const fpsOptions: DropdownOption[] = isUvc
+    ? (selFrame?.fpsOptions ?? []).map((o) => ({key: String(o.interval), label: `${o.fps} fps`}))
+    : (ranges?.fpsRanges ?? []).map((r) => ({
+        key: `${r.min}-${r.max}`,
+        label: r.min === r.max ? `${r.max} fps` : `${r.min}–${r.max} fps`,
+      }));
+  const fpsValue = isUvc ? (cam.uvcInterval != null ? String(cam.uvcInterval) : null) : `${cam.prefFps}-${cam.prefFps}`;
+
+  const onResChange = (key: string) => {
+    if (isUvc) {
+      const [fi, fri] = key.split(':').map(Number);
+      const f = (ranges?.formats ?? []).find((x) => x.index === fi);
+      const fr = f?.frames.find((x) => x.index === fri);
+      const best = fr?.fpsOptions[0]; // liste triée desc → fps max d'abord
+      cam.setUvcSelection(fi, fri, best ? best.interval : null);
+      if (best) cam.setStreamPrefs({fps: best.fps});
+      onRestart({formatIndex: fi, frameIndex: fri, interval: best?.interval});
+    } else {
+      const [w, h] = key.split('x').map(Number);
+      cam.setStreamPrefs({width: w, height: h});
+      cam.setUvcSelection(null, null, null);
+      onRestart({width: w, height: h});
+    }
+  };
+
+  const onFpsChange = (key: string) => {
+    if (isUvc) {
+      const interval = Number(key);
+      cam.setUvcSelection(cam.uvcFormatIndex, cam.uvcFrameIndex, interval);
+      onRestart({formatIndex: cam.uvcFormatIndex ?? undefined, frameIndex: cam.uvcFrameIndex ?? undefined, interval});
+    } else {
+      const [mn, mx] = key.split('-').map(Number);
+      cam.setStreamPrefs({fps: mx});
+      if (cameraId) void astroCamera.setParams(cameraId, {fpsMin: mn, fpsMax: mx});
+    }
+  };
+
+  return (
+    <Card style={{marginTop: 10}}>
+      <Title text={t.cam.fluxTitle} />
+      {resOptions.length > 0 ? (
+        <Dropdown label={t.cam.resolution} value={resValue} options={resOptions} onChange={onResChange} />
+      ) : null}
+      {fpsOptions.length > 0 ? (
+        <Dropdown label={t.cam.fpsSensor} value={fpsValue} options={fpsOptions} onChange={onFpsChange} />
+      ) : null}
+      <View style={{marginTop: 8}}>
+        <Text style={{color: c.textDim, fontSize: 12, marginBottom: 4}}>{t.cam.displayFps}</Text>
+        <Segmented<string>
+          value={String(cam.displayFps)}
+          onChange={(v) => cam.setDisplayFps(Number(v))}
+          options={[
+            {key: '4', label: '4 fps'}, {key: '8', label: '8 fps'}, {key: '12', label: '12 fps'},
+            {key: '20', label: '20 fps'}, {key: '30', label: '30 fps'},
+          ]}
+        />
+      </View>
+      <Text style={{color: c.textFaint, fontSize: 10.5, marginTop: 8, lineHeight: 15}}>{t.cam.fluxHint}</Text>
+    </Card>
+  );
+}
+
+/**
+ * CARTE « FILTRES D'IMAGE » (v2.8.0 — « appliquer des filtres de lumière
+ * sur les acquisitions d'image, sélection manuelle ou automatique ») :
+ *  - mode AUTO : la recommandation part des statistiques de la première
+ *    pose (pixels chauds, fond/pollution, bruit) — intégré au workflow
+ *    d'acquisition automatique ;
+ *  - mode MANUEL : toggles par filtre ;
+ *  - capture des TRAMES DE CALIBRAGE (noire objectif couvert / flat ciel
+ *    uniforme) — la trame noire est appliquée PAR FRAME avant empilement.
+ */
+function FiltersCard({streaming}: {streaming: boolean}) {
+  const t = useT();
+  const c = usePal();
+  const cam = useCameraStore();
+  const plan: FilterPlan = useSettingsStore((st) => st.imageFilters);
+  const setPlan = useSettingsStore((st) => st.setImageFilters);
+  const [calibBusy, setCalibBusy] = useState<null | 'dark' | 'flat'>(null);
+  const [calibMsg, setCalibMsg] = useState<string | null>(null);
+
+  const capture = async (kind: 'dark' | 'flat') => {
+    if (!cam.streaming || calibBusy) return;
+    setCalibBusy(kind);
+    setCalibMsg(null);
+    const f = await captureCalibFrames(6);
+    if (f) {
+      if (kind === 'dark') { cam.setDarkFrame(f); setCalibMsg(t.cam.darkOk); }
+      else { cam.setFlatFrame(f); setCalibMsg(t.cam.flatOk); }
+    } else {
+      setCalibMsg(t.cam.calibFail);
+    }
+    setCalibBusy(null);
+  };
+
+  const active = activeFilterKeys(plan);
+  const cs = t.cam as unknown as Record<string, string>;
+
+  return (
+    <Card style={{marginTop: 10}}>
+      <Title text={t.cam.filtersTitle} />
+      <Segmented<'auto' | 'manuel'>
+        value={plan.auto ? 'auto' : 'manuel'}
+        onChange={(m) => setPlan({...plan, auto: m === 'auto'})}
+        options={[{key: 'auto', label: t.cam.filterAuto}, {key: 'manuel', label: t.cam.filterManual}]}
+      />
+      {plan.auto ? (
+        <Text style={{color: c.textFaint, fontSize: 10.5, marginTop: 6, lineHeight: 15}}>
+          {t.cam.filterAutoHint}
+        </Text>
+      ) : (
+        <View style={{marginTop: 4}}>
+          <Toggle value={plan.dark} onChange={(v) => setPlan({...plan, dark: v})} label={t.cam.filterDark} />
+          <Toggle value={plan.flat} onChange={(v) => setPlan({...plan, flat: v})} label={t.cam.filterFlat} />
+          <Toggle value={plan.hotPixels} onChange={(v) => setPlan({...plan, hotPixels: v})} label={t.cam.filterHot} />
+          <Toggle value={plan.gradient} onChange={(v) => setPlan({...plan, gradient: v})} label={t.cam.filterGradient} />
+          <Toggle value={plan.denoise} onChange={(v) => setPlan({...plan, denoise: v})} label={t.cam.filterDenoise} />
+          <Toggle value={plan.sharpen} onChange={(v) => setPlan({...plan, sharpen: v})} label={t.cam.filterSharpen} />
+        </View>
+      )}
+      <View style={[s.row, {marginTop: 8}]}>
+        <Btn label={calibBusy === 'dark' ? '…' : t.cam.captureDark} style={{flex: 1, marginRight: 6}}
+          disabled={!streaming || calibBusy != null} onPress={() => void capture('dark')} />
+        <Btn label={calibBusy === 'flat' ? '…' : t.cam.captureFlat} style={{flex: 1}}
+          disabled={!streaming || calibBusy != null} onPress={() => void capture('flat')} />
+      </View>
+      <View style={[s.row, {marginTop: 6}]}>
+        <Text style={{color: cam.darkFrame ? c.green : c.textFaint, fontSize: 11, flex: 1}}>
+          {cam.darkFrame ? t.cam.darkSet : t.cam.darkUnset}
+        </Text>
+        {cam.darkFrame ? (
+          <TouchableOpacity onPress={() => cam.setDarkFrame(null)}>
+            <Text style={{color: c.blue, fontSize: 11}}>{t.cam.clear}</Text>
+          </TouchableOpacity>
+        ) : null}
+      </View>
+      <View style={[s.row, {marginTop: 2}]}>
+        <Text style={{color: cam.flatFrame ? c.green : c.textFaint, fontSize: 11, flex: 1}}>
+          {cam.flatFrame ? t.cam.flatSet : t.cam.flatUnset}
+        </Text>
+        {cam.flatFrame ? (
+          <TouchableOpacity onPress={() => cam.setFlatFrame(null)}>
+            <Text style={{color: c.blue, fontSize: 11}}>{t.cam.clear}</Text>
+          </TouchableOpacity>
+        ) : null}
+      </View>
+      {calibMsg ? <Text style={{color: c.amber, fontSize: 11, marginTop: 4}}>{calibMsg}</Text> : null}
+      {active.length > 0 ? (
+        <Text style={{color: c.textDim, fontSize: 10.5, marginTop: 6}}>
+          {t.cam.filterApplied} : {active.map((k) => cs[k]).filter(Boolean).join(', ')}
+        </Text>
+      ) : null}
+    </Card>
+  );
+}
+
 export function CameraScreen() {
   const t = useT();
   const c = usePal();
@@ -268,6 +472,7 @@ export function CameraScreen() {
   const guideScale = useSettingsStore((st) => st.guideScaleArcsecPerPx);
   const setGuideAxes = useSettingsStore((st) => st.setGuideAxes);
   const setGuideScale = useSettingsStore((st) => st.setGuideScale);
+  const imageFilters = useSettingsStore((st) => st.imageFilters);
 
   const cam = useCameraStore();
   const [busy, setBusy] = useState(false);
@@ -276,7 +481,11 @@ export function CameraScreen() {
   const [kind, setKind] = useState<AcqKind>('moon');
   const [quality, setQuality] = useState<AcqQuality>('standard');
 
-  const plan = buildPlan(kind, quality, cam.devices.find((d) => d.id === cam.cameraId));
+  const plan = buildPlan(
+    kind, quality,
+    cam.devices.find((d) => d.id === cam.cameraId),
+    imageFilters,
+  );
 
   // Abonnement léger aux frames : FPS + dernier frame + centroïde (autoguidage store)
   useEffect(() => {
@@ -333,9 +542,29 @@ export function CameraScreen() {
     if (!ok) {cam.setAcq({state: 'error', done: 0, total: 0, note: 'cameraPermission'}); return;}
     setBusy(true);
     try {
-      await astroCamera.open(cam.cameraId, 960, 720, 12, 75);
+      await astroCamera.open(cam.cameraId, {
+        width: cam.prefWidth, height: cam.prefHeight, fpsMax: cam.prefFps,
+        formatIndex: cam.uvcFormatIndex ?? undefined,
+        frameIndex: cam.uvcFrameIndex ?? undefined,
+        interval: cam.uvcInterval ?? undefined,
+      });
       cam.setStreaming(true);
     } catch (e) {
+      cam.setAcq({state: 'error', done: 0, total: 0, note: (e as Error).message});
+    }
+    setBusy(false);
+  };
+
+  /** Relance du flux (changement résolution/framerate — v2.8.0). */
+  const restartStream = async (opts: OpenOpts) => {
+    if (!cam.cameraId) return;
+    setBusy(true);
+    try {
+      await astroCamera.close();
+      await astroCamera.open(cam.cameraId, opts);
+      cam.setStreaming(true);
+    } catch (e) {
+      cam.setStreaming(false);
       cam.setAcq({state: 'error', done: 0, total: 0, note: (e as Error).message});
     }
     setBusy(false);
@@ -389,7 +618,8 @@ export function CameraScreen() {
 
   const startAcq = async () => {
     const onProgress = (p: AcqProgress) => useCameraStore.getState().setAcq(p);
-    const res = await acquisitionRunner.run(plan, onProgress);
+    const res = await acquisitionRunner.run(
+      plan, onProgress, {dark: cam.darkFrame, flat: cam.flatFrame});
     if (res) useCameraStore.getState().setResult(res);
   };
 
@@ -407,7 +637,9 @@ export function CameraScreen() {
   ];
 
   return (
-    <View style={{flex: 1, backgroundColor: c.bg, padding: 12, paddingTop: 0}}>
+    <ScrollView
+      style={{flex: 1, backgroundColor: c.bg}}
+      contentContainerStyle={{padding: 12, paddingTop: 0, paddingBottom: 40}}>
       <StatusHeader />
 
       {/* ---------- CAMÉRA + FLUX ---------- */}
@@ -458,6 +690,13 @@ export function CameraScreen() {
       {/* ---------- RÉGLAGES MANUELS (v2.7.0) ---------- */}
       <ParamsPanel cameraId={cam.cameraId} streaming={cam.streaming} />
 
+      {/* ---------- RÉSOLUTION & CADENCE (v2.8.0) ---------- */}
+      <FluxPanel cameraId={cam.cameraId} streaming={cam.streaming}
+        onRestart={(opts) => void restartStream(opts)} />
+
+      {/* ---------- FILTRES D'IMAGE (v2.8.0) ---------- */}
+      <FiltersCard streaming={cam.streaming} />
+
       {/* ---------- AUTOGUIDAGE ---------- */}
       <Card style={{marginTop: 10}}>
         <Title text={t.cam.guideTitle} />
@@ -501,7 +740,7 @@ export function CameraScreen() {
       </Card>
 
       {/* ---------- ACQUISITION ---------- */}
-      <Card style={{marginTop: 10, marginBottom: 20}}>
+      <Card style={{marginTop: 10}}>
         <Title text={t.cam.acqTitle} />
         <Segmented<'rapide' | 'standard' | 'haute'>
           value={quality}
@@ -566,6 +805,6 @@ export function CameraScreen() {
           </View>
         ) : null}
       </Card>
-    </View>
+    </ScrollView>
   );
 }

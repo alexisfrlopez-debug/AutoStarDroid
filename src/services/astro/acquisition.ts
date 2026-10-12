@@ -14,6 +14,10 @@
  *    progression, puis EMPILE via stacking.ts et rend une image finale.
  */
 import {stackFrames, stretchGray, grayToDataUri, decodeGrayB64, type StackMode} from './stacking';
+import {
+  applyFrameFilters, applyPostFilters, recommendFilters, NO_FILTERS,
+  type FilterPlan,
+} from './filters';
 import {astroCamera} from '../phone/astroCamera';
 
 export type AcqQuality = 'rapide' | 'standard' | 'haute';
@@ -99,10 +103,19 @@ export interface AcqPlan {
   note: string;
   /** La pose demande-t-elle un capteur en mode manuel ? */
   needsManualSensor: boolean;
+  /** FILTRES DE LUMIÈRE (v2.8.0) : null = comportement historique
+   *  (étirement seul). auto = la recommandation sera calculée sur la
+   *  première frame. Manuel = toggles de l'utilisateur. */
+  filters: FilterPlan | null;
 }
 
-/** Plan de pose pour un preset et une qualité — pur. */
-export function buildPlan(kind: AcqKind, quality: AcqQuality, camera?: {manual: boolean} | null): AcqPlan {
+/** Plan de pose pour un preset et une qualité — pur.
+ *  filters (v2.8.0) : plan de filtres choisi (ou null). */
+export function buildPlan(
+  kind: AcqKind, quality: AcqQuality,
+  camera?: {manual: boolean} | null,
+  filters: FilterPlan | null = null,
+): AcqPlan {
   const p = ACQ_PRESETS[kind];
   const exposureMs = p.byQuality[quality];
   const count = p.count[quality];
@@ -112,6 +125,7 @@ export function buildPlan(kind: AcqKind, quality: AcqQuality, camera?: {manual: 
   return {
     kind, quality, exposureMs, iso: p.iso, count, intervalMs, stack: p.stack, note: p.note,
     needsManualSensor: needsManual && exposureMs > 1500,
+    filters,
   };
 }
 
@@ -143,12 +157,16 @@ class AcquisitionRunner {
 
   /**
    * Exécute un plan : N poses (via l'anneau de luminance native — les frames
-   * du flux en cours) espacées de l'intervalle, empilement, étirement,
-   * image finale. NE LÈVE PAS : l'état d'erreur passe dans la progression.
+   * du flux en cours) espacées de l'intervalle, FILTRES (v2.8.0 : trame
+   * noire / flat / pixels chauds par frame AVANT empilement ; gradient /
+   * débruitage / gamma / netteté APRÈS), empilement, image finale.
+   * calib : trames de calibrage capturées (objectif couvert / ciel uniforme).
+   * NE LÈVE PAS : l'état d'erreur passe dans la progression.
    */
   async run(
     plan: AcqPlan,
     onProgress: (p: AcqProgress) => void,
+    calib?: {dark?: Uint8Array | null; flat?: Uint8Array | null},
   ): Promise<AcqResult | null> {
     if (this.running) return null;
     this.running = true;
@@ -159,9 +177,13 @@ class AcquisitionRunner {
       const frames: Uint8Array[] = [];
       const started = Date.now();
       let grabbed = 0;
+      // plan de filtres EFFECTIF : en mode auto, la recommandation est
+      // calculée sur la PREMIÈRE frame (statistiques réelles du ciel) —
+      // ensuite les mêmes filtres s'appliquent à toute la série.
+      let effFilters: FilterPlan | null = plan.filters;
       // capture : on récolte des frames DISTINCTES de l'anneau natif —
       // chaque pose attend qu'une NOUVELLE frame (ts différent) arrive ;
-      // l'intervalle du plan cadence la récupération (poses longtes : le
+      // l'intervalle du plan cadence la récupération (poses longues : le
       // natif émet sa dernière frame, l'attente reste bornée).
       while (grabbed < plan.count && !this.cancel) {
         const t0 = Date.now();
@@ -170,10 +192,18 @@ class AcquisitionRunner {
           // la pose haute qualité n'a pas d'anneau direct : on échantillonne
           // l'anneau courant (le signal change peu sur l'intervalle)
           const hist = await astroCamera.lumaHistory();
-          const last = hist.length ? decodeGrayB64(hist[hist.length - 1], W, H) : null;
-          if (last) frames.push(last);
-          grabbed += 1;
-          onProgress({state: 'running', done: grabbed, total: plan.count, note: null});
+          let last = hist.length ? decodeGrayB64(hist[hist.length - 1], W, H) : null;
+          if (last) {
+            if (effFilters) {
+              if (effFilters.auto && frames.length === 0) {
+                effFilters = recommendFilters(last, W, H, !!calib?.dark, !!calib?.flat);
+              }
+              last = applyFrameFilters(last, effFilters, calib?.dark ?? null, calib?.flat ?? null, W, H);
+            }
+            frames.push(last);
+            grabbed += 1;
+            onProgress({state: 'running', done: grabbed, total: plan.count, note: null});
+          }
         }
         const wait = plan.intervalMs - (Date.now() - t0);
         if (wait > 0 && !this.cancel) await new Promise((r) => setTimeout(r, wait));
@@ -185,8 +215,12 @@ class AcquisitionRunner {
       }
       onProgress({state: 'stacking', done: frames.length, total: plan.count, note: null});
       const {gray} = stackFrames(frames, W, H, plan.stack);
-      const stretched = stretchGray(gray);
-      const uri = grayToDataUri(stretched, W, H);
+      // image finale : pipeline filtres (gradient/denoise/gamma/sharpen)
+      // ou étirement historique — NO_FILTERS et null sont équivalents ici
+      const final = effFilters && effFilters !== NO_FILTERS
+        ? applyPostFilters(gray, effFilters, W, H)
+        : stretchGray(gray);
+      const uri = grayToDataUri(final, W, H);
       const res: AcqResult = {resultUri: uri, used: frames.length, total: plan.count, kind: plan.kind, quality: plan.quality};
       onProgress({state: 'done', done: frames.length, total: plan.count, note: null});
       return res;
@@ -201,3 +235,26 @@ class AcquisitionRunner {
 }
 
 export const acquisitionRunner = new AcquisitionRunner();
+
+/**
+ * Capture d'une TRAME DE CALIBRAGE (v2.8.0) : `count` poses médianées —
+ * objectif COUVERT (trame noire : offset + thermique) ou ciel uniforme
+ * (trame flat : vignettage). La médiane rejette les outliers thermiques.
+ * Renvoie null si le flux est arrêté.
+ */
+export async function captureCalibFrames(count = 6): Promise<Uint8Array | null> {
+  const W = 192; const H = 144;
+  const frames: Uint8Array[] = [];
+  for (let i = 0; i < count; i++) {
+    const shot = await astroCamera.captureStill().catch(() => null);
+    if (shot) {
+      const hist = await astroCamera.lumaHistory();
+      const last = hist.length ? decodeGrayB64(hist[hist.length - 1], W, H) : null;
+      if (last) frames.push(last);
+    }
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  if (frames.length === 0) return null;
+  const {gray} = stackFrames(frames, W, H, 'median');
+  return gray;
+}

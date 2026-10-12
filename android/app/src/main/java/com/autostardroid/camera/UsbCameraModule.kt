@@ -311,6 +311,11 @@ class UsbCameraModule(reactContext: ReactApplicationContext) :
       closeLocked()
       val size = chooseSize(cameraId, width, height)
           ?: return promise.reject("SIZE", "Aucune taille de flux disponible")
+      // v2.8.0 — la cadence CAPTEUR suit fpsMax (plage AE la plus proche) :
+      // frameSkip (pont JS) plafonne le trafic, cette plage règle le capteur.
+      val ch = try { mgr.getCameraCharacteristics(cameraId) } catch (_: Exception) { null }
+      val fpsRange = ch?.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+          ?.minByOrNull { Math.abs(it.upper - fpsMax.coerceIn(1, 60)) * 10 + Math.abs(it.lower - fpsMax.coerceIn(1, 60)) }
       thread = HandlerThread("autostar-camera").apply { start() }
       handler = Handler(thread!!.looper)
       frameSkip = if (fpsMax >= 30) 1 else maxOf(1, 30 / maxOf(1, fpsMax))
@@ -332,6 +337,9 @@ class UsbCameraModule(reactContext: ReactApplicationContext) :
                     addTarget(reader!!.surface)
                     set(android.hardware.camera2.CaptureRequest.CONTROL_MODE,
                         android.hardware.camera2.CaptureRequest.CONTROL_MODE_AUTO)
+                    if (fpsRange != null) {
+                      set(CR.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
+                    }
                   }
                   lastBuilder = req
                   s.setRepeatingRequest(req.build(), null, handler)
@@ -436,6 +444,26 @@ class UsbCameraModule(reactContext: ReactApplicationContext) :
         wbModes.pushInt(m)
       }
       out.putArray("wbModes", wbModes)
+      // v2.8.0 — sélecteur de RÉSOLUTION : toutes les tailles de flux YUV
+      val map = ch.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+      val sizes = map?.getOutputSizes(ImageFormat.YUV_420_888)
+      if (sizes != null) {
+        val arr = Arguments.createArray()
+        sizes.sortedByDescending { it.width * it.height }.take(24).forEach { sz ->
+          val m = Arguments.createMap()
+          m.putInt("w", sz.width); m.putInt("h", sz.height)
+          arr.pushMap(m)
+        }
+        out.putArray("sizes", arr)
+      }
+      // v2.8.0 — sélecteur de FRAMERATE : plages AE disponibles (fps capteur)
+      val fpsArr = Arguments.createArray()
+      ch.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)?.forEach { r ->
+        val m = Arguments.createMap()
+        m.putInt("min", r.lower); m.putInt("max", r.upper)
+        fpsArr.pushMap(m)
+      }
+      out.putArray("fpsRanges", fpsArr)
       promise.resolve(out)
     } catch (e: Exception) {
       promise.reject("RANGES", e.message, e)
@@ -526,6 +554,12 @@ class UsbCameraModule(reactContext: ReactApplicationContext) :
       }
       if (o.has("focusDistance")) {
         apply("focusDistance") { b.set(CR.LENS_FOCUS_DISTANCE, o.getDouble("focusDistance").toFloat()) }
+      }
+      // v2.8.0 — cadence capteur (plage AE cible) : fpsMin/fpsMax
+      if (o.has("fpsMin") || o.has("fpsMax")) {
+        val lo = if (o.has("fpsMin")) o.getInt("fpsMin") else 1
+        val hi = if (o.has("fpsMax")) o.getInt("fpsMax") else 30
+        apply("fps") { b.set(CR.CONTROL_AE_TARGET_FPS_RANGE, Range(lo, hi)) }
       }
       try {
         s.setRepeatingRequest(b.build(), null, handler)

@@ -19,6 +19,35 @@ export interface ParamRange {
   def: number;
 }
 
+/** Cadence annoncée par la caméra UVC (fps + intervalle UVC exact). */
+export interface UvcFpsOption {
+  fps: number;
+  /** Intervalle de frame UVC en unités 100 ns (10 000 000 / fps). */
+  interval: number;
+}
+
+/** Frame (résolution) annoncée par un format UVC. */
+export interface UvcFrameInfo {
+  index: number;
+  w: number;
+  h: number;
+  fpsOptions: UvcFpsOption[];
+}
+
+/** Format UVC (MJPEG / YUV) — contient ses résolutions. */
+export interface UvcFormatInfo {
+  index: number;
+  mjpeg: boolean;
+  label: string;
+  frames: UvcFrameInfo[];
+}
+
+/** Taille de flux Camera2 (sélecteur de résolution). */
+export interface C2SizeInfo {
+  w: number;
+  h: number;
+}
+
 export interface CameraRanges {
   source: 'uvc' | 'camera2';
   manual: boolean;
@@ -27,6 +56,12 @@ export interface CameraRanges {
   controls: Record<string, ParamRange>;
   /** Modes de balance des blancs (Camera2) — [] si n/a. */
   wbModes: string[];
+  /** UVC — formats + résolutions + cadences annoncées par la caméra. */
+  formats?: UvcFormatInfo[];
+  /** Camera2 — tailles de flux disponibles. */
+  sizes?: C2SizeInfo[];
+  /** Camera2 — plages AE cibles (fps capteur). */
+  fpsRanges?: Array<{min: number; max: number}>;
 }
 
 export interface ManualParams {
@@ -51,6 +86,9 @@ export interface ManualParams {
   focusMode?: 'auto' | 'manual';
   /** Dioptries (Camera2) ou valeur brute (UVC focusAbsolute). */
   focusDistance?: number;
+  /** Camera2 — cadence capteur (plage AE cible). */
+  fpsMin?: number;
+  fpsMax?: number;
 }
 
 export interface CameraDeviceInfo {
@@ -83,6 +121,18 @@ export interface CameraFrame {
   flux?: number;
 }
 
+/** Options d'ouverture du flux (v2.8.0). */
+export interface OpenOpts {
+  width?: number;
+  height?: number;
+  fpsMax?: number;
+  quality?: number;
+  /** UVC : format + frame + intervalle EXACTS de getRanges().formats. */
+  formatIndex?: number;
+  frameIndex?: number;
+  interval?: number;
+}
+
 const CAM = NativeModules.NativeUsbCamera as
   | {
       listCameras(): Promise<Array<Partial<CameraDeviceInfo>>>;
@@ -93,6 +143,7 @@ const CAM = NativeModules.NativeUsbCamera as
         manual: boolean;
         iso?: ParamRange; exposureMs?: ParamRange; ev?: ParamRange;
         zoomMax?: number; focusMin?: number; wbModes?: number[];
+        sizes?: C2SizeInfo[]; fpsRanges?: Array<{min: number; max: number}>;
       }>;
       captureStill(): Promise<string>;
       getLumaHistory(): Promise<string[]>;
@@ -112,10 +163,12 @@ const UVC = NativeModules.NativeUvcCamera as
       hasUvcPermission(deviceName: string): Promise<boolean>;
       requestUvcPermission(deviceName: string): Promise<boolean>;
       openUvcStream(deviceName: string, width: number, height: number, fpsMax: number, quality: number): Promise<boolean>;
+      openUvcStreamEx(deviceName: string, formatIndex: number, frameIndex: number, interval: number, quality: number): Promise<boolean>;
       closeUvcStream(): Promise<boolean>;
       isUvcStreaming(): Promise<boolean>;
       getUvcRanges(deviceName: string): Promise<{
         controls: Record<string, ParamRange>;
+        formats?: UvcFormatInfo[];
       }>;
       setUvcControls(deviceName: string, json: string): Promise<{applied: string[]; failed: string[]}>;
       setLock(x: number, y: number, halfWindow: number): Promise<boolean>;
@@ -182,15 +235,25 @@ export const astroCamera = {
   },
 
   /** Ouvre le flux (UVC : permission USB demandée d'abord — CAMÉRA
-   *  runtime requise seulement pour Camera2). */
-  async open(cameraId: string, width = 960, height = 720, fpsMax = 12, quality = 75): Promise<void> {
+   *  runtime requise seulement pour Camera2).
+   *  opts (v2.8.0) : taille/fps demandés ; pour l'UVC, formatIndex +
+   *  frameIndex + interval sélectionnés EXPLICITEMENT dans getRanges().formats
+   *  (choix exact de la caméra) — sinon la meilleure frame est choisie
+   *  automatiquement pour width×height. */
+  async open(cameraId: string, opts: OpenOpts = {}): Promise<void> {
+    const {width = 960, height = 720, fpsMax = 12, quality = 75,
+      formatIndex, frameIndex, interval} = opts;
     if (cameraId.startsWith('uvc:')) {
       if (!UVC) throw new Error('Module UVC absent');
       const deviceName = cameraId.slice(4);
       const granted = await UVC.requestUvcPermission(deviceName).catch(() => false);
       if (!granted) throw new Error('Permission USB refusée');
       activeDeviceName = deviceName;
-      await UVC.openUvcStream(deviceName, width, height, fpsMax, quality);
+      if (formatIndex != null && frameIndex != null && interval != null) {
+        await UVC.openUvcStreamEx(deviceName, formatIndex, frameIndex, interval, quality);
+      } else {
+        await UVC.openUvcStream(deviceName, width, height, fpsMax, quality);
+      }
       return;
     }
     if (!CAM) throw new Error('Module caméra absent');
@@ -200,20 +263,25 @@ export const astroCamera = {
 
   /** Plages de réglages de la caméra donnée (curseurs manuels v2.7.0).
    *  Normalisées : UVC expose directement ses contrôles ; Camera2 fournit
-   *  iso/exposureMs/ev + zoom/focus dérivés des caractéristiques. */
+   *  iso/exposureMs/ev + zoom/focus dérivés des caractéristiques.
+   *  v2.8.0 : formats UVC (résolutions + cadences) et tailles/plages FPS
+   *  Camera2 — alimentent les sélecteurs « Résolution & cadence ». */
   async getRanges(cameraId: string): Promise<CameraRanges> {
     if (cameraId.startsWith('uvc:')) {
       if (!UVC || !activeDeviceName) {
-        return {source: 'uvc', manual: true, controls: {}, wbModes: []};
+        return {source: 'uvc', manual: true, controls: {}, wbModes: [], formats: []};
       }
       try {
         const r = await UVC.getUvcRanges(activeDeviceName);
-        return {source: 'uvc', manual: true, controls: r?.controls ?? {}, wbModes: []};
+        return {
+          source: 'uvc', manual: true, controls: r?.controls ?? {}, wbModes: [],
+          formats: r?.formats ?? [],
+        };
       } catch (_) {
-        return {source: 'uvc', manual: true, controls: {}, wbModes: []};
+        return {source: 'uvc', manual: true, controls: {}, wbModes: [], formats: []};
       }
     }
-    if (!CAM) return {source: 'camera2', manual: false, controls: {}, wbModes: []};
+    if (!CAM) return {source: 'camera2', manual: false, controls: {}, wbModes: [], sizes: [], fpsRanges: []};
     try {
       const r = await CAM.getRanges2(cameraId);
       const controls: Record<string, ParamRange> = {};
@@ -232,9 +300,13 @@ export const astroCamera = {
         5: 'daylight', 6: 'cloudy', 7: 'twilight', 8: 'shade',
       };
       const wb = (r.wbModes ?? []).map((m) => WB_NAMES[m]).filter(Boolean);
-      return {source: 'camera2', manual: r.manual, controls, wbModes: wb};
+      return {
+        source: 'camera2', manual: r.manual, controls, wbModes: wb,
+        sizes: (r as {sizes?: C2SizeInfo[]}).sizes ?? [],
+        fpsRanges: (r as {fpsRanges?: Array<{min: number; max: number}>}).fpsRanges ?? [],
+      };
     } catch (_) {
-      return {source: 'camera2', manual: false, controls: {}, wbModes: []};
+      return {source: 'camera2', manual: false, controls: {}, wbModes: [], sizes: [], fpsRanges: []};
     }
   },
 

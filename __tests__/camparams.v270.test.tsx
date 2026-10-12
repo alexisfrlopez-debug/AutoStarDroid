@@ -19,6 +19,7 @@ jest.mock('@react-native-async-storage/async-storage', () => ({
 const calls = {
   uvcPermission: [] as string[],
   uvcOpen: [] as Array<[string, number, number, number, number]>,
+  uvcOpenEx: [] as Array<[string, number, number, number, number]>,
   c2Open: [] as string[],
   uvcSet: [] as string[],
   c2Set: [] as string[],
@@ -38,6 +39,9 @@ import {NativeModules} from 'react-native';
   openUvcStream: jest.fn(async (...a: [string, number, number, number, number]) => {
     calls.uvcOpen.push(a); return true;
   }),
+  openUvcStreamEx: jest.fn(async (...a: [string, number, number, number, number]) => {
+    calls.uvcOpenEx.push(a); return true;
+  }),
   closeUvcStream: jest.fn(async () => true),
   isUvcStreaming: jest.fn(async () => false),
   getUvcRanges: jest.fn(async () => ({
@@ -47,6 +51,13 @@ import {NativeModules} from 'react-native';
       whiteBalanceTemp: {min: 2800, max: 6500, step: 100, def: 4600},
     },
     hasPu: true, hasCt: true,
+    formats: [{
+      index: 1, mjpeg: true, label: 'MJPEG',
+      frames: [{
+        index: 2, w: 1280, h: 720,
+        fpsOptions: [{fps: 30, interval: 333333}, {fps: 15, interval: 666667}],
+      }],
+    }],
   })),
   setUvcControls: jest.fn(async (_n: string, json: string) => {
     calls.uvcSet.push(json);
@@ -78,6 +89,8 @@ import {NativeModules} from 'react-native';
     zoomMax: 4,
     focusMin: 10,
     wbModes: [0, 5, 6],
+    sizes: [{w: 1920, h: 1080}, {w: 1280, h: 720}],
+    fpsRanges: [{min: 15, max: 15}, {min: 15, max: 30}],
   })),
   setLock: jest.fn(async (x: number) => { calls.c2Lock.push(x); return true; }),
   clearLock: jest.fn(async () => true),
@@ -115,17 +128,27 @@ describe('astroCamera — détection fusionnée (UVC d\u2019abord)', () => {
 
 describe('astroCamera — ouverture du flux (permission UVC)', () => {
   it('UVC : permission PUIS openUvcStream(deviceName)', async () => {
-    await astroCamera.open('uvc:cam0', 800, 600, 15, 80);
+    await astroCamera.open('uvc:cam0', {width: 800, height: 600, fpsMax: 15, quality: 80});
     expect(calls.uvcPermission).toEqual(['cam0']);
     expect(calls.uvcOpen).toHaveLength(1);
     expect(calls.uvcOpen[0]).toEqual(['cam0', 800, 600, 15, 80]);
     expect(calls.c2Open).toHaveLength(0);
   });
 
+  it('UVC v2.8.0 : format/frame/interval explicites → openUvcStreamEx', async () => {
+    await astroCamera.open('uvc:cam0', {formatIndex: 1, frameIndex: 2, interval: 333333, quality: 90});
+    expect(calls.uvcOpenEx).toHaveLength(1);
+    expect(calls.uvcOpenEx[0]).toEqual(['cam0', 1, 2, 333333, 90]);
+    // PAS de repli openUvcStream quand la sélection explicite est complète
+    expect(calls.uvcOpen).toHaveLength(1);
+  });
+
   it('interne : openStream Camera2, PAS de permission UVC', async () => {
-    await astroCamera.open('1', 640, 480, 10, 70);
+    const permsBefore = calls.uvcPermission.length;
+    await astroCamera.open('1', {width: 640, height: 480, fpsMax: 10, quality: 70});
     expect(calls.c2Open).toEqual(['1']);
-    expect(calls.uvcPermission.length).toBe(1); // inchangé depuis le test UVC
+    // l'ouverture interne n'ajoute AUCUNE demande de permission UVC
+    expect(calls.uvcPermission.length).toBe(permsBefore);
   });
 
   it('permission UVC refusée → erreur claire, pas d\u2019ouverture', async () => {
@@ -153,22 +176,36 @@ describe('astroCamera — réglages manuels routés', () => {
     expect(failed).toEqual([]);
   });
 
-  it('UVC : plages natives passées telles quelles', async () => {
+  it('UVC : plages natives passées telles quelles + formats (v2.8.0)', async () => {
     await astroCamera.open('uvc:cam0');
     const r = await astroCamera.getRanges('uvc:cam0');
     expect(r.source).toBe('uvc');
     expect(r.controls.exposureMs).toEqual({min: 0.1, max: 2000, step: 0.1, def: 10});
     expect(r.controls.gain).toBeDefined();
     expect(r.wbModes).toEqual([]);
+    // formats = sélecteurs résolution/framerate alimentés par le matériel
+    expect(r.formats).toHaveLength(1);
+    expect(r.formats![0].label).toBe('MJPEG');
+    expect(r.formats![0].frames[0].w).toBe(1280);
+    expect(r.formats![0].frames[0].fpsOptions).toEqual(
+      [{fps: 30, interval: 333333}, {fps: 15, interval: 666667}]);
   });
 
-  it('Camera2 : zoom/focus dérivés des caractéristiques, noms WB convertis', async () => {
+  it('Camera2 : zoom/focus dérivés, noms WB convertis, sizes + fpsRanges (v2.8.0)', async () => {
     const r = await astroCamera.getRanges('1');
     expect(r.source).toBe('camera2');
     expect(r.controls.zoom).toEqual({min: 0, max: 1, step: 0.02, def: 0});
     expect(r.controls.focusAbsolute!.max).toBe(10);
     expect(r.wbModes).toEqual(['auto', 'daylight', 'cloudy']);
     expect(r.manual).toBe(true);
+    expect(r.sizes).toEqual([{w: 1920, h: 1080}, {w: 1280, h: 720}]);
+    expect(r.fpsRanges).toEqual([{min: 15, max: 15}, {min: 15, max: 30}]);
+  });
+
+  it('Camera2 : fpsMin/fpsMax passent dans setParams2 (JSON string)', async () => {
+    await astroCamera.setParams('1', {fpsMin: 15, fpsMax: 25} as any);
+    const last = JSON.parse(calls.c2Set[calls.c2Set.length - 1]);
+    expect(last).toEqual({fpsMin: 15, fpsMax: 25});
   });
 
   it('verrou de suivi routé vers le flux ACTIF (UVC)', async () => {

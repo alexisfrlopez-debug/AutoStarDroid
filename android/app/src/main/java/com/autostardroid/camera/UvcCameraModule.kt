@@ -45,12 +45,16 @@ import org.json.JSONObject
  *  - DESCRIPTORS : parsing brut (rawDescriptors) — terminal caméra, unité
  *    de traitement, formats MJPEG/UNCOMPRESSED, frames + intervalles,
  *    alternate settings ;
- *  - FLUX : négociation UVC (PROBE/COMMIT), alternate setting, lecture
- *    BULK en boucle, désencapsulation des en-têtes UVC, frames JPEG
- *    émises vers le JS (événement 'cameraFrame', MÊME format que Camera2 —
- *    l'aperçu/l'autoguidage/l'acquisition fonctionnent sans changement) ;
- *    luminance réduite 192×144 + centroïde (verrou de suivi) calculés
- *    CÔTÉ NATIF comme pour Camera2 ;
+ *  - FLUX : négociation UVC (PROBE/COMMIT — préremplie par GET_CUR),
+ *    CLEAR_FEATURE(ENDPOINT_HALT) avant lecture, lecture BULK en boucle
+ *    PAR TRANCHES ≤ 16 Ko (limite bulkTransfer Android) et RÉASSEMBLAGE
+ *    des frames par bascule FID + marqueur JPEG EOI (v2.8.0 — la v2.7.0
+ *    confondait le bit EOH (fin d'EN-TÊTE) avec une fin de FRAME : chaque
+ *    paquet émettait un fragment JPEG incomplet → aucun flux visible),
+ *    frames JPEG émises vers le JS (événement 'cameraFrame', MÊME format
+ *    que Camera2 — l'aperçu/l'autoguidage/l'acquisition fonctionnent sans
+ *    changement) ; luminance réduite 192×144 + centroïde (verrou de
+ *    suivi) calculés CÔTÉ NATIF comme pour Camera2 ;
  *  - CONTRÔLES : requêtes UVC (exposition auto/absolue, gain, luminosité,
  *    contraste, saturation, netteté, balance des blancs auto/température,
  *    zoom, focus auto/absolu) avec plages lues GET_MIN/GET_MAX/GET_RES/
@@ -386,8 +390,25 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
   /* Flux                                                           */
   /* ------------------------------------------------------------ */
 
+  /** Ouverture classique (v2.7.0) : la meilleure frame pour width×height
+   *  + intervalle le plus proche de fpsMax — délègue à openStreamInternal. */
   @ReactMethod
   fun openUvcStream(deviceName: String, width: Int, height: Int, fpsMax: Int, quality: Int, promise: Promise) {
+    openStreamInternal(deviceName, null, null, null, width, height, fpsMax, quality, promise)
+  }
+
+  /** Ouverture EXPLICITE (v2.8.0 — « choisir la résolution, framerate ») :
+   *  format/frame/intervalle choisis dans les listes de getUvcRanges
+   *  (interval en unités UVC 100 ns). */
+  @ReactMethod
+  fun openUvcStreamEx(deviceName: String, formatIndex: Int, frameIndex: Int, interval: Int, quality: Int, promise: Promise) {
+    openStreamInternal(deviceName, formatIndex, frameIndex, interval, 0, 0, 0, quality, promise)
+  }
+
+  private fun openStreamInternal(
+      deviceName: String, formatIndex: Int?, frameIndex: Int?, interval: Int?,
+      width: Int, height: Int, fpsMax: Int, quality: Int, promise: Promise,
+  ) {
     try {
       val mgr = usbManager ?: return promise.reject("USB", "UsbManager indisponible")
       val dev = mgr.deviceList.values.firstOrNull { it.deviceName == deviceName }
@@ -402,12 +423,20 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
       controlUnitPu = desc.puId
       controlUnitCt = desc.ctId
 
-      val picked = pickFrame(desc.formats, width, height)
-          ?: run { conn.close(); return promise.reject("UVC", "Aucun format/frames UVC dans les descripteurs") }
+      val picked = if (formatIndex != null && frameIndex != null) {
+        val f = desc.formats.firstOrNull { it.index == formatIndex }
+        val fr = f?.frames?.firstOrNull { it.index == frameIndex }
+        if (f != null && fr != null) Pair(f, fr) else null
+      } else pickFrame(desc.formats, width, height)
+      picked ?: run {
+        conn.close()
+        return promise.reject("UVC", "Format/frame UVC introuvable dans les descripteurs")
+      }
       val (format, frame) = picked
-      // intervalle : le plus rapide sous 1/(fpsMax) ; sinon le plus rapide
+      // intervalle explicite, sinon le plus rapide sous 1/(fpsMax) ; sinon le plus rapide
       val wantInt = 10_000_000 / (if (fpsMax in 1..59) fpsMax else 60)
-      val interval = frame.intervals.minByOrNull { Math.abs(it - wantInt) }
+      val intervalVal = interval
+          ?: frame.intervals.minByOrNull { Math.abs(it - wantInt) }
           ?: frame.intervals.minOrNull() ?: 10_000_000
 
       // interface VS + endpoint bulk IN
@@ -431,12 +460,18 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
         return promise.reject("UVC", "Claim interface VS échoué")
       }
 
-      // négociation PROBE/COMMIT
+      // CLEAR_FEATURE(ENDPOINT_HALT) : débloque un endpoint resté coincé
+      // par une session précédente (même précaution que libusb)
+      try { conn.controlTransfer(0x02, 0x01, 0, ep.address, null, 0, 200) } catch (_: Exception) {}
+
+      // négociation PROBE/COMMIT — on PART de la négociation courante
+      // (GET_CUR préremplit dwMaxVideoFrameSize/payload et les champs
+      // version : certains firmwares refusent une structure tout-zéro)
       val probeLen = ctrlGetLen(conn)
-      val probe = ByteArray(probeLen)
+      val probe = (ctrlGetVs(conn, CS_PROBE, 0x81, probeLen) ?: ByteArray(probeLen)).copyOf()
       probe[2] = format.index.toByte()
       probe[3] = frame.index.toByte()
-      putLe32(probe, 4, interval)
+      putLe32(probe, 4, intervalVal)
       if (!ctrlSetVs(conn, CS_PROBE, probe)) {
         conn.close(); return promise.reject("UVC", "PROBE refusé par la caméra")
       }
@@ -463,8 +498,12 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
 
       thread = HandlerThread("autostar-uvc").apply { start() }
       handler = Handler(thread!!.looper)
-      val bufSize = maxOf(16 * 1024, maxPayload.coerceAtLeast(0).coerceAtMost(256 * 1024))
-      val payloadCap = if (maxFrameBytes > 0) maxFrameBytes else frame.w * frame.h
+      // ⚠️ UsbDeviceConnection.bulkTransfer est plafonné à 16384 octets par
+      // appel — au-delà chaque transfert échoue (v2.7.0 : bufSize = maxPayload
+      // pouvait dépasser → aucun flux). Les GRANDES frames sont réassemblées
+      // par la boucle de lecture (accumulateur).
+      val bufSize = maxPayload.coerceIn(1024, 16_384)
+      val payloadCap = if (maxFrameBytes > 0) maxFrameBytes else frame.w * frame.h * 2
       val t = Thread {
         bulkReadLoop(conn, ep, bufSize, payloadCap)
       }
@@ -495,12 +534,25 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
     b[off + 3] = ((v shr 24) and 0xFF).toByte()
   }
 
-  /** Boucle de lecture BULK — désencapsulation des en-têtes UVC, frames
-   *  complètes → émission événement (JPEG + luma + centroïde). */
+  /**
+   * Boucle de lecture BULK — CORRECT v2.8.0 : les paquets UVC sont des
+   * FRAGMENTS de frame (16 Ko max par bulkTransfer), la frame complète est
+   * réassemblée dans un accumulateur. Frontières de frame :
+   *  - bascule du bit FID (bmHeaderInfo bit 0 — identifiant de frame qui
+   *    s'inverse à chaque nouvelle frame) → la frame précédente est finie ;
+   *  - pour MJPEG : marqueur EOI (FF D9) en fin de payload — émission
+   *    immédiate, sans attendre le paquet suivant (certaines caméras ne
+   *    basculent FID qu'au premier paquet de la frame SUIVANTE).
+   * bit 5 (0x20) = ERR → frame à jeter. NB : le bit 6 (0x40) est EOH (fin
+   * d'EN-TÊTE, pas fin de frame) — la v2.7.0 le prenait pour une fin de
+   * frame et émettait chaque paquet comme une « frame » JPEG incomplète
+   * (décodage impossible → AUCUN flux visible).
+   */
   private fun bulkReadLoop(conn: UsbDeviceConnection, ep: UsbEndpoint, bufSize: Int, payloadCap: Int) {
     val buf = ByteArray(bufSize)
-    var acc = ByteArray(payloadCap)
+    var acc = ByteArray(maxOf(payloadCap, 96 * 1024))
     var accLen = 0
+    var lastFid = -1
     var errors = 0
     while (streaming) {
       val n = try { conn.bulkTransfer(ep, buf, buf.size, BULK_TIMEOUT_MS) } catch (_: Exception) { -1 }
@@ -512,10 +564,20 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
       errors = 0
       var pos = 0
       while (pos + 2 <= n) {
-        val hlen = buf[pos].toInt() and 0x7F
-        if (hlen < 2 || pos + hlen > n) { pos = n; break } // en-tête invalide : jetons le paquet
-        val eof = (buf[pos + 1].toInt() and 0x40) != 0
-        val plen = n - (pos + hlen)
+        val hlen = buf[pos].toInt() and 0xFF
+        if (hlen < 2 || pos + hlen > n) break // en-tête invalide : on jette le paquet
+        val hdr = buf[pos + 1].toInt() and 0xFF
+        val fid = hdr and 0x01            // Frame Identifier (bascule par frame)
+        val err = (hdr and 0x20) != 0     // ERR : frame corrompue → jetée
+        val plen = maxOf(0, n - (pos + hlen))
+        if (err) { accLen = 0; pos += hlen + plen; continue }
+        if (fid != lastFid && lastFid >= 0 && accLen > 0) {
+          // bascule FID = début d'une NOUVELLE frame → la précédente est complète
+          val frame = acc.copyOf(accLen)
+          accLen = 0
+          emitFrame(frame)
+        }
+        lastFid = fid
         if (plen > 0) {
           if (accLen + plen > acc.size) {
             // frame trop grande : réalloue (caméra renvoyant plus que annoncé)
@@ -523,11 +585,14 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
           }
           System.arraycopy(buf, pos + hlen, acc, accLen, plen)
           accLen += plen
-        }
-        if (eof && accLen > 0) {
-          val frame = acc.copyOf(accLen)
-          accLen = 0
-          emitFrame(frame)
+          // MJPEG : EOI en bout de payload = frame complète, émission immédiate
+          if (isMjpeg && accLen >= 4 &&
+              acc[0] == 0xFF.toByte() && acc[1] == 0xD8.toByte() &&
+              acc[accLen - 2] == 0xFF.toByte() && acc[accLen - 1] == 0xD9.toByte()) {
+            val frame = acc.copyOf(accLen)
+            accLen = 0
+            emitFrame(frame)
+          }
         }
         pos += hlen + plen
       }
@@ -689,7 +754,13 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
   /* Réglages UVC (contrôles)                                       */
   /* ------------------------------------------------------------ */
 
-  private fun openTempConnection(deviceName: String): Pair<UsbDeviceConnection, Boolean>? {
+  /** Connexion de travail pour les contrôles : RÉUTILISE la connexion du
+   *  flux actif si présent (deux connexions ouvertes sur le même appareil
+   *  perturbent certains firmware, et la v2.7.0 fuyait la temporaire).
+   *  Retour : (connexion, temporaire ?) — la temporaire est à fermer. */
+  private fun acquireConn(deviceName: String): Pair<UsbDeviceConnection, Boolean>? {
+    val active = connection
+    if (active != null) return Pair(active, false)
     val mgr = usbManager ?: return null
     val dev = mgr.deviceList.values.firstOrNull { it.deviceName == deviceName } ?: return null
     if (!mgr.hasPermission(dev)) return null
@@ -724,14 +795,19 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
   }
 
   /** Plages des contrôles disponibles (deviceName) — alimente les curseurs.
-   *  Réponse : {controls:{<key>:{min,max,step,def}}, hasPu, hasCt}. */
+   *  Réponse : {controls:{<key>:{min,max,step,def}}, hasPu, hasCt,
+   *  formats:[{index, mjpeg, label, frames:[{index, w, h, fpsOptions:
+   *  [{fps, interval}]}]}]} — formats/frames = listes de RÉSOLUTION et
+   *  FPS exactement annoncées par la caméra (v2.8.0, sélecteurs). */
   @ReactMethod
   fun getUvcRanges(deviceName: String, promise: Promise) {
     var conn: UsbDeviceConnection? = null
+    var isTemp = false
     try {
-      val tmp = openTempConnection(deviceName)
+      val tmp = acquireConn(deviceName)
           ?: return promise.reject("PERM", "Permission USB absente ou appareil indisponible")
       conn = tmp.first
+      isTemp = tmp.second
       val desc = parseDescriptors(conn)
       vcIfNum = if (desc.vcIfNum >= 0) desc.vcIfNum else 0
       controlUnitPu = desc.puId
@@ -755,11 +831,50 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
       out.putMap("controls", ctrls)
       out.putBoolean("hasPu", desc.puId != 0)
       out.putBoolean("hasCt", desc.ctId != 0)
+      // formats + frames + cadences (descripteurs — exactement ce que la
+      // caméra sait faire : sélecteurs résolution/framerate v2.8.0)
+      val fmts = Arguments.createArray()
+      for (f in desc.formats) {
+        val fm = Arguments.createMap()
+        fm.putInt("index", f.index)
+        fm.putBoolean("mjpeg", f.mjpeg)
+        fm.putString("label", if (f.mjpeg) "MJPEG" else "YUV")
+        val frs = Arguments.createArray()
+        for (fr in f.frames.sortedBy { it.w * it.h }) {
+          val frm = Arguments.createMap()
+          frm.putInt("index", fr.index)
+          frm.putInt("w", fr.w)
+          frm.putInt("h", fr.h)
+          val opts = Arguments.createArray()
+          val seen = HashSet<Int>()
+          for (iv in fr.intervals.filter { it > 0 }.sorted()) {
+            val fps = Math.round(10_000_000.0 / iv).toInt()
+            if (fps < 1 || fps > 120 || !seen.add(fps)) continue
+            val om = Arguments.createMap()
+            om.putInt("fps", fps)
+            om.putInt("interval", iv)
+            opts.pushMap(om)
+          }
+          // liste triée desc (plus rapide d'abord), plafonnée à 14 entrées
+          val capped = Arguments.createArray()
+          var pushed = 0
+          for (k in opts.size() - 1 downTo 0) {
+            if (pushed >= 14) break
+            capped.pushMap(opts.getMap(k))
+            pushed += 1
+          }
+          frm.putArray("fpsOptions", capped)
+          frs.pushMap(frm)
+        }
+        fm.putArray("frames", frs)
+        fmts.pushMap(fm)
+      }
+      out.putArray("formats", fmts)
       promise.resolve(out)
     } catch (e: Exception) {
       promise.reject("RANGES", e.message, e)
     } finally {
-      if (connection == null) { try { conn?.close() } catch (_: Exception) {} }
+      if (isTemp) { try { conn?.close() } catch (_: Exception) {} }
     }
   }
 
@@ -793,7 +908,7 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
   fun setUvcControls(deviceName: String, json: String, promise: Promise) {
     try {
       val o = JSONObject(json)
-      val tmp = openTempConnection(deviceName)
+      val tmp = acquireConn(deviceName)
           ?: return promise.reject("PERM", "Permission USB absente ou appareil indisponible")
       val conn = tmp.first
       try {
@@ -840,7 +955,7 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
         out.putArray("failed", failed)
         promise.resolve(out)
       } finally {
-        if (connection == null) { try { conn.close() } catch (_: Exception) {} }
+        if (tmp.second) { try { conn.close() } catch (_: Exception) {} }
       }
     } catch (e: Exception) {
       promise.reject("CTRL", e.message, e)

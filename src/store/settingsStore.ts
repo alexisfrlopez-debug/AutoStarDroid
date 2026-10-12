@@ -6,6 +6,8 @@ import type {PhoneAngle, PhonePose, PhonePosition} from '../services/astro/phone
 import type {GuidingAxes} from '../services/astro/guiding';
 import type {DriverPref} from '../services/protocol/driver';
 import type {CustomMount} from '../services/mounts/catalog';
+import type {FilterPlan} from '../services/astro/filters';
+import {DEFAULT_FILTERS} from '../services/astro/filters';
 
 export type Lang = 'en' | 'fr';
 export type ScopeModelId = 'autostar2' | 'autostar497' | 'autostar495' | 'autostar494' | 'lx200';
@@ -62,6 +64,9 @@ interface SettingsState {
   mountBrandId: string | null;
   mountModelId: string | null;
   customMount: CustomMount | null;
+  /** FILTRES DE LUMIÈRE (v2.8.0) : préférences persistées — mode auto
+   *  (sélection d'après les statistiques de l'image) ou manuel (toggles). */
+  imageFilters: FilterPlan;
   setLanguage: (l: Lang) => void;
   setNightVision: (v: boolean) => void;
   setKeySounds: (v: boolean) => void;
@@ -84,6 +89,7 @@ interface SettingsState {
   setPrefDriver: (d: DriverPref) => void;
   setMountSelection: (brandId: string | null, modelId: string | null) => void;
   setCustomMount: (c: CustomMount | null) => void;
+  setImageFilters: (f: FilterPlan) => void;
 }
 
 export const useSettingsStore = create<SettingsState>()(
@@ -112,6 +118,7 @@ export const useSettingsStore = create<SettingsState>()(
       mountBrandId: null,
       mountModelId: null,
       customMount: null,
+      imageFilters: DEFAULT_FILTERS,
       setLanguage: (language) => set({language}),
       setNightVision: (nightVision) => set({nightVision}),
       setKeySounds: (keySounds) => set({keySounds}),
@@ -135,6 +142,7 @@ export const useSettingsStore = create<SettingsState>()(
       setMountSelection: (mountBrandId, mountModelId) =>
         set({mountBrandId, mountModelId, customMount: null}),
       setCustomMount: (customMount) => set({customMount}),
+      setImageFilters: (imageFilters) => set({imageFilters}),
     }),
     {
       name: 'autostardroid-settings',
