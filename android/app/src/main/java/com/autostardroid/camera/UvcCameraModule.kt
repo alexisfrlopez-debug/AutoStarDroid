@@ -280,6 +280,12 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
     var vsIfNum = -1
     val formats = ArrayList<UvcFormat>()
     val vsEps = ArrayList<VsEp>()
+    /** Diagnostic — tous les alternate settings VS vus au parsing. */
+    val vsAlts = LinkedHashSet<Int>()
+    /** Diagnostic — tous les endpoints VS vus (tous sens/types),
+     *  "addr=0x88 attr=0x01 raw=1024" : alimente le message d'erreur si
+     *  aucun endpoint exploitable n'est trouvé (retour terrain v2.9.1). */
+    val rawEps = ArrayList<String>()
   }
 
   private fun parseDescriptors(conn: UsbDeviceConnection): UvcDesc {
@@ -335,25 +341,36 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
                 out.formats.add(curFormat)
               }
               ST_VS_FRAME_MJPEG, ST_VS_FRAME_UNCOMPRESSED, ST_VS_FRAME_FRAME_BASED -> {
-                val f = curFormat ?: break
-                val idx = d[i + 3].toInt() and 0xFF
-                val w = (d[i + 4].toInt() and 0xFF) or ((d[i + 5].toInt() and 0xFF) shl 8)
-                val h = (d[i + 6].toInt() and 0xFF) or ((d[i + 7].toInt() and 0xFF) shl 8)
-                val nTypes = d[i + 28].toInt() and 0xFF
-                val intervals = ArrayList<Int>()
-                if (nTypes == 0 && i + 41 <= i + len) {
-                  // continu : min / max / pas
-                  val lo = le32(d, i + 29); val hi = le32(d, i + 33); val step = le32(d, i + 37).coerceAtLeast(1)
-                  var v = lo
-                  while (v <= hi && intervals.size < 32) { intervals.add(v); v += step }
-                } else {
-                  var k = 0
-                  while (k < nTypes && i + 29 + k * 4 + 3 < i + len) {
-                    intervals.add(le32(d, i + 29 + k * 4)); k += 1
+                // ⚠️ PAS de `break` ici : dans un `when` imbriqué, break sort
+                // de la BOUCLE while — le parsing serait tronqué et les
+                // endpoints (après les descripteurs de classe) jamais vus
+                // (retour terrain : « Aucun endpoint VideoStreaming IN »).
+                // Format inconnu → frame simplement ignorée.
+                val f = curFormat
+                if (f != null) {
+                  val idx = d[i + 3].toInt() and 0xFF
+                  val w = (d[i + 4].toInt() and 0xFF) or ((d[i + 5].toInt() and 0xFF) shl 8)
+                  val h = (d[i + 6].toInt() and 0xFF) or ((d[i + 7].toInt() and 0xFF) shl 8)
+                  val nTypes = d[i + 28].toInt() and 0xFF
+                  val intervals = ArrayList<Int>()
+                  if (nTypes == 0 && i + 41 <= i + len) {
+                    // continu : min / max / pas
+                    val lo = le32(d, i + 29); val hi = le32(d, i + 33); val step = le32(d, i + 37).coerceAtLeast(1)
+                    var v = lo
+                    while (v <= hi && intervals.size < 32) { intervals.add(v); v += step }
+                  } else {
+                    var k = 0
+                    while (k < nTypes && i + 29 + k * 4 + 3 < i + len) {
+                      intervals.add(le32(d, i + 29 + k * 4)); k += 1
+                    }
                   }
+                  f.frames.add(UvcFrame(idx, w, h, intervals.toIntArray()))
                 }
-                f.frames.add(UvcFrame(idx, w, h, intervals.toIntArray()))
               }
+              // formats non décodables (H264, stream-based, DV, VP8…) :
+              // on neutralise curFormat pour que leurs frames ne se rattachent
+              // PAS au format précédent (et n'arrêtent jamais le parsing)
+              else -> curFormat = null
             }
           }
         }
@@ -363,7 +380,12 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
           val addr = d[i + 2].toInt() and 0xFF
           val attr = d[i + 3].toInt() and 0x03
           val raw = (d[i + 4].toInt() and 0xFF) or ((d[i + 5].toInt() and 0xFF) shl 8)
-          if ((addr and 0x80) != 0 && (attr == 0x02 || attr == 0x00)) {
+          out.vsAlts.add(curIfAlt)
+          out.rawEps.add("0x%02X/0x%02X/%d".format(Locale.US, addr, attr, raw))
+          // ⚠️ v2.9.1 : l'isochrone est attr = 0x01 (la v2.8.1 testait
+          // 0x00 — control — et REJETAIT donc toutes les webcams ISO :
+          // « Aucun endpoint VideoStreaming IN » sur les webcams grand public).
+          if ((addr and 0x80) != 0 && (attr == 0x02 || attr == 0x01)) {
             out.vsEps.add(VsEp(curIfAlt, addr, attr == 0x02, raw))
           }
         }
@@ -490,8 +512,14 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
       val isoEpDescs = desc.vsEps.filterNot { it.bulk }.sortedBy { it.maxPacket }
       if (bulkEpDesc == null && isoEpDescs.isEmpty()) {
         conn.close()
+        // message enrichi v2.9.1 : ce que le parsing a VU (formats, alts,
+        // endpoints bruts) — indispensable pour diagnostiquer une caméra
+        // exotique d'après le seul retour utilisateur.
         return promise.reject("UVC",
-            "Aucun endpoint VideoStreaming IN — descripteurs UVC non conformes")
+            "Aucun endpoint VideoStreaming IN (formats=%d, alts=[%s], eps=[%s])"
+                .format(Locale.US, desc.formats.size,
+                    desc.vsAlts.joinToString(",") { it.toString() },
+                    desc.rawEps.joinToString(" ")))
       }
       val isoMode = bulkEpDesc == null
 
