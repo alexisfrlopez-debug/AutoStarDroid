@@ -3,6 +3,7 @@ package com.autostardroid
 import android.app.Application
 import com.autostardroid.bt.BluetoothSppPackage
 import com.autostardroid.camera.UsbCameraPackage
+import com.autostardroid.camera.UvcCameraPackage
 import com.autostardroid.sensors.SensorsPackage
 import com.autostardroid.tts.TtsPackage
 import com.autostardroid.usb.UsbSerialPackage
@@ -27,6 +28,7 @@ class MainApplication : Application(), ReactApplication {
               add(SensorsPackage())
               add(TtsPackage())
               add(UsbCameraPackage())
+              add(UvcCameraPackage())
             }
 
         override fun getJSMainModuleName(): String = "index"

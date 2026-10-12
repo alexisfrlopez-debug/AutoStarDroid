@@ -56,12 +56,13 @@ import {
   approachStopDecision,
 } from '../astro/diag';
 import {
-  resolvePreset,
+  type MountPreset,
   limitLegGuardSec,
   remainingToLimitDeg,
   fastApproachGuardSec,
   STOP_APPROACH_MARGIN_DEG,
 } from '../astro/mounts';
+import {activePreset as resolveActivePreset} from '../mounts/catalog';
 import {telemetryFitOf, useTelemetryStore} from '../../store/telemetryStore';
 import {applyFit, type Quat} from '../astro/telemetry';
 import {withAlt, type DisplayObject} from '../catalog';
@@ -507,10 +508,13 @@ class DiagRunner {
     }
   }
 
-  /** Preset de monture actif (choix manuel ou détection raquette). */
-  private activePreset() {
+  /** Preset de monture actif (catalogue Montures, saisie manuelle, ou
+   *  détection raquette — v2.7.0). */
+  private activePreset(): MountPreset {
     const st = useSettingsStore.getState();
-    return resolvePreset(st.mountPreset, useScopeStore.getState().model);
+    return resolveActivePreset(
+        st.mountBrandId, st.mountModelId, st.customMount,
+        useScopeStore.getState().model, st.mountPreset);
   }
 
   /** 4 directions via measureRate (qui persiste dans motorCalibStore). */

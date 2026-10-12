@@ -23,7 +23,9 @@ import {useT} from '../i18n';
 import {useSettingsStore} from '../store/settingsStore';
 import {useCameraStore} from '../store/cameraStore';
 import {useScopeStore} from '../store/scopeStore';
-import {astroCamera} from '../services/phone/astroCamera';
+import {
+  astroCamera, type CameraRanges, type ManualParams,
+} from '../services/phone/astroCamera';
 import {
   acquisitionRunner, buildPlan,
   type AcqKind, type AcqQuality, type AcqProgress,
@@ -33,6 +35,8 @@ import {
 } from '../services/astro/guiding';
 import {StatusHeader} from '../components/StatusHeader';
 import {Btn, Card, Segmented, Toggle, Title, usePal, s} from '../components/ui';
+import {SliderBar} from '../components/SliderBar';
+import {Dropdown} from '../components/Dropdown';
 
 /** Aperçu : consomme le flux à part (throttle 150 ms) pour ne pas
  *  relancer tout l'écran à chaque frame. */
@@ -64,6 +68,198 @@ function Preview() {
   );
 }
 
+/** Libellé i18n d'un contrôle du panneau de réglages. */
+function paramLabel(t: ReturnType<typeof useT>, key: string): string {
+  const cs = t.cam as unknown as Record<string, string>;
+  return cs[`param${key.charAt(0).toUpperCase()}${key.slice(1)}`] ?? key;
+}
+
+/** Formatage adapté de la valeur (ms de pose → s au-delà de 1 000). */
+function fmtValue(key: string, v: number): string {
+  if (key === 'exposureMs') {
+    if (Math.abs(v) >= 1000) return `${(v / 1000).toFixed(2)} s`;
+    if (Math.abs(v) >= 1) return `${v.toFixed(v >= 10 ? 1 : 2)} ms`;
+    return `${(v * 1000).toFixed(0)} µs`;
+  }
+  if (key === 'zoom') return `${(1 + v * 4).toFixed(1)}×`;
+  if (key === 'ev') return `${v > 0 ? '+' : ''}${v.toFixed(1)} EV`;
+  if (key === 'whiteBalanceTemp') return `${Math.round(v)} K`;
+  if (key === 'focusAbsolute') return v.toFixed(2);
+  return Math.abs(v) >= 10 ? String(Math.round(v)) : v.toFixed(2);
+}
+
+/**
+ * PANNEAU « RÉGLAGES MANUELS » (v2.7.0 — « je voudrais aussi pouvoir régler
+ * manuellement les paramètres de la caméra ») : construit depuis les plages
+ * lues du MATÉRIEL (UVC : GET_MIN/GET_MAX des contrôles · Camera2 :
+ * caractéristiques du capteur) — seuls les contrôles réellement disponibles
+ * sont affichés, chacun avec son curseur borné + pas.
+ */
+function ParamsPanel({cameraId, streaming}: {cameraId: string | null; streaming: boolean}) {
+  const t = useT();
+  const c = usePal();
+  const [ranges, setRanges] = useState<CameraRanges | null>(null);
+  const [vals, setVals] = useState<Record<string, number>>({});
+  const [exposureMode, setExposureMode] = useState<'auto' | 'manual'>('auto');
+  const [focusAuto, setFocusAuto] = useState(true);
+  const [wbAuto, setWbAuto] = useState(true);
+  const [wbMode, setWbMode] = useState<string>('auto');
+  const [failed, setFailed] = useState<string[]>([]);
+
+  const loadRanges = async () => {
+    if (!cameraId) return;
+    setRanges(null);
+    setFailed([]);
+    const r = await astroCamera.getRanges(cameraId);
+    setRanges(r);
+    const init: Record<string, number> = {};
+    for (const k of Object.keys(r.controls)) init[k] = r.controls[k].def;
+    setVals(init);
+  };
+
+  useEffect(() => {
+    if (streaming) void loadRanges();
+    else { setRanges(null); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cameraId, streaming]);
+
+  const apply = async (p: ManualParams) => {
+    if (!cameraId) return;
+    try {
+      const f = await astroCamera.setParams(cameraId, p);
+      setFailed(f ?? []);
+    } catch (_) {
+      setFailed(['error']);
+    }
+  };
+
+  const setParam = (key: string, value: number) => {
+    setVals({...vals, [key]: value});
+    const p: ManualParams = {};
+    switch (key) {
+      case 'exposureMs': p.exposureMode = 'manual'; p.exposureMs = value; break;
+      case 'iso': p.exposureMode = 'manual'; p.iso = Math.round(value); break;
+      case 'ev': p.exposureComp = Math.round(value); break;
+      default: (p as Record<string, number>)[key] = value;
+    }
+    void apply(p);
+  };
+
+  const switchExposure = (mode: 'auto' | 'manual') => {
+    setExposureMode(mode);
+    if (mode === 'auto') {
+      void apply({exposureMode: 'auto'});
+    } else {
+      const p2: ManualParams = {exposureMode: 'manual'};
+      if (vals.exposureMs !== undefined) p2.exposureMs = vals.exposureMs;
+      else if (ranges?.controls.exposureMs) p2.exposureMs = ranges.controls.exposureMs.def;
+      if (vals.iso !== undefined) p2.iso = Math.round(vals.iso);
+      else if (ranges?.controls.iso) p2.iso = Math.round(ranges.controls.iso.def);
+      void apply(p2);
+    }
+  };
+
+  const hasControl = (k: string) => ranges?.controls[k] != null;
+  const manualExposure = hasControl('exposureMs') || hasControl('iso');
+
+  if (!streaming) return null;
+
+  return (
+    <Card style={{marginTop: 10}}>
+      <View style={[s.row, s.between]}>
+        <Title text={t.cam.settingsTitle} />
+        <TouchableOpacity onPress={() => void loadRanges()}>
+          <Text style={{color: c.blue, fontSize: 11, fontWeight: '700'}}>{t.cam.refreshRanges}</Text>
+        </TouchableOpacity>
+      </View>
+      {!ranges ? (
+        <Text style={{color: c.textFaint, fontSize: 12}}>…</Text>
+      ) : !manualExposure && Object.keys(ranges.controls).length === 0 && ranges.wbModes.length === 0 ? (
+        <Text style={{color: c.textFaint, fontSize: 12}}>{t.cam.noRanges}</Text>
+      ) : (
+        <View>
+          {manualExposure ? (
+            <View style={{marginBottom: 4}}>
+              <Segmented<'auto' | 'manual'>
+                value={exposureMode}
+                onChange={switchExposure}
+                options={[{key: 'auto', label: t.cam.autoMode}, {key: 'manual', label: t.cam.manualMode}]}
+              />
+            </View>
+          ) : null}
+          {exposureMode === 'manual' && hasControl('exposureMs') ? (
+            <SliderBar label={paramLabel(t, 'exposureMs')} value={vals.exposureMs ?? 0}
+              {...ranges.controls.exposureMs} unit=""
+              format={(v) => fmtValue('exposureMs', v)}
+              onCommit={(v) => setParam('exposureMs', v)} />
+          ) : null}
+          {exposureMode === 'manual' && hasControl('iso') ? (
+            <SliderBar label={paramLabel(t, 'iso')} value={vals.iso ?? 0}
+              {...ranges.controls.iso} unit=""
+              format={(v) => `${Math.round(v)}`}
+              onCommit={(v) => setParam('iso', v)} />
+          ) : null}
+          {exposureMode === 'auto' && hasControl('ev') ? (
+            <SliderBar label={paramLabel(t, 'ev')} value={vals.ev ?? 0}
+              {...ranges.controls.ev} unit=""
+              format={(v) => fmtValue('ev', v)}
+              onCommit={(v) => setParam('ev', v)} />
+          ) : null}
+          {(['gain', 'brightness', 'contrast', 'saturation', 'sharpness'] as const).map((k) =>
+            hasControl(k) ? (
+              <SliderBar key={k} label={paramLabel(t, k)} value={vals[k] ?? 0}
+                {...ranges.controls[k]} unit=""
+                format={(v) => fmtValue(k, v)}
+                onCommit={(v) => setParam(k, v)} />
+            ) : null,
+          )}
+          {ranges.source === 'uvc' && hasControl('whiteBalanceTemp') ? (
+            <View>
+              <Toggle value={wbAuto} label={t.cam.wbAuto}
+                onChange={(v) => { setWbAuto(v); void apply({whiteBalanceAuto: v}); }} />
+              {!wbAuto ? (
+                <SliderBar label={paramLabel(t, 'whiteBalanceTemp')} value={vals.whiteBalanceTemp ?? 0}
+                  {...ranges.controls.whiteBalanceTemp} unit=""
+                  format={(v) => fmtValue('whiteBalanceTemp', v)}
+                  onCommit={(v) => setParam('whiteBalanceTemp', v)} />
+              ) : null}
+            </View>
+          ) : null}
+          {ranges.wbModes.length > 1 ? (
+            <Dropdown label={t.cam.wbMode} value={wbMode}
+              options={ranges.wbModes.map((m) => ({key: m, label: m}))}
+              onChange={(m) => { setWbMode(m); void apply({wbMode: m as ManualParams['wbMode']}); }} />
+          ) : null}
+          {hasControl('zoom') ? (
+            <SliderBar label={paramLabel(t, 'zoom')} value={vals.zoom ?? 0}
+              {...ranges.controls.zoom} unit=""
+              format={(v) => fmtValue('zoom', v)}
+              onCommit={(v) => setParam('zoom', v)} />
+          ) : null}
+          {hasControl('focusAbsolute') ? (
+            <View>
+              <Toggle value={focusAuto} label={t.cam.focusAuto}
+                onChange={(v) => { setFocusAuto(v); void apply({focusMode: v ? 'auto' : 'manual'}); }} />
+              {!focusAuto ? (
+                <SliderBar label={paramLabel(t, 'focusAbsolute')} value={vals.focusAbsolute ?? 0}
+                  {...ranges.controls.focusAbsolute} unit=""
+                  format={(v) => fmtValue('focusAbsolute', v)}
+                  onCommit={(v) => setParam('focusAbsolute', v)} />
+              ) : null}
+            </View>
+          ) : null}
+          {failed.length > 0 ? (
+            <Text style={{color: c.orange, fontSize: 11, marginTop: 6}}>
+              {t.cam.failed.replace('{0}', failed.join(', '))}
+            </Text>
+          ) : null}
+          <Text style={{color: c.textFaint, fontSize: 10.5, marginTop: 8, lineHeight: 15}}>{t.cam.hint}</Text>
+        </View>
+      )}
+    </Card>
+  );
+}
+
 export function CameraScreen() {
   const t = useT();
   const c = usePal();
@@ -79,7 +275,6 @@ export function CameraScreen() {
   const [calibMsg, setCalibMsg] = useState<string | null>(null);
   const [kind, setKind] = useState<AcqKind>('moon');
   const [quality, setQuality] = useState<AcqQuality>('standard');
-  const [expoComp, setExpoComp] = useState(0);
 
   const plan = buildPlan(kind, quality, cam.devices.find((d) => d.id === cam.cameraId));
 
@@ -97,11 +292,21 @@ export function CameraScreen() {
       }
       st.setLastFrame({data: '', w: f.w, h: f.h, ts: f.ts, cx: f.cx, cy: f.cy, peak: f.peak, flux: f.flux});
     });
-    return rel;
+    // Coupure matérielle du flux UVC (débranchement) — l'écran repart propre
+    const relLost = astroCamera.onStreamLost(() => {
+      const st = useCameraStore.getState();
+      st.setStreaming(false);
+      st.setFps(0);
+      st.setLock(null);
+      st.setAcq({state: 'error', done: 0, total: 0, note: 'noFrames'});
+    });
+    return () => { rel(); relLost(); };
   }, []);
 
-  const requestPermission = async (): Promise<boolean> => {
+  const requestPermission = async (cameraId: string | null): Promise<boolean> => {
     if (Platform.OS !== 'android') return true;
+    // UVC USB-host : PAS de permission CAMÉRA Android requise (accès direct USB)
+    if (cameraId?.startsWith('uvc:')) return true;
     try {
       const r = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.CAMERA);
       return r === PermissionsAndroid.RESULTS.GRANTED;
@@ -124,7 +329,7 @@ export function CameraScreen() {
 
   const startStream = async () => {
     if (!cam.cameraId) return;
-    const ok = await requestPermission();
+    const ok = await requestPermission(cam.cameraId);
     if (!ok) {cam.setAcq({state: 'error', done: 0, total: 0, note: 'cameraPermission'}); return;}
     setBusy(true);
     try {
@@ -190,12 +395,6 @@ export function CameraScreen() {
 
   const stopAcq = () => acquisitionRunner.stop();
 
-  const setExposure = async (delta: number) => {
-    const v = Math.max(-8, Math.min(8, expoComp + delta));
-    setExpoComp(v);
-    try {await astroCamera.setParams(v, 0, 0);} catch (_) {/* capteur sans compensation */}
-  };
-
   const acqKinds: Array<{key: AcqKind; label: string}> = [
     {key: 'moon', label: t.cam.presetMoon},
     {key: 'planets', label: t.cam.presetPlanets},
@@ -248,19 +447,16 @@ export function CameraScreen() {
         )}
         <View style={[s.row, {marginTop: 8}]}>
           {cam.streaming ? (
-            <Btn label={`${t.cam.stop} (${cam.fps} fps)`} variant="danger" style={{flex: 1, marginRight: 6}} onPress={() => void stopStream()} />
+            <Btn label={`${t.cam.stop} (${cam.fps} fps)`} variant="danger" style={{flex: 1}} onPress={() => void stopStream()} />
           ) : (
-            <Btn label={t.cam.start} variant="primary" style={{flex: 1, marginRight: 6}} disabled={!cam.cameraId || busy} onPress={() => void startStream()} />
+            <Btn label={t.cam.start} variant="primary" style={{flex: 1}} disabled={!cam.cameraId || busy} onPress={() => void startStream()} />
           )}
-          {cam.streaming ? (
-            <>
-              <Btn label='−' style={{marginRight: 4, paddingHorizontal: 14}} onPress={() => void setExposure(-1)} />
-              <Btn label='+' style={{paddingHorizontal: 14}} onPress={() => void setExposure(1)} />
-            </>
-          ) : null}
         </View>
-        {cam.streaming ? <Text style={{color: c.textFaint, fontSize: 11, marginTop: 4}}>{t.cam.tapLock} {expoComp !== 0 ? `· EV ${expoComp > 0 ? '+' : ''}${expoComp}` : ''}</Text> : null}
+        {cam.streaming ? <Text style={{color: c.textFaint, fontSize: 11, marginTop: 4}}>{t.cam.tapLock}</Text> : null}
       </Card>
+
+      {/* ---------- RÉGLAGES MANUELS (v2.7.0) ---------- */}
+      <ParamsPanel cameraId={cam.cameraId} streaming={cam.streaming} />
 
       {/* ---------- AUTOGUIDAGE ---------- */}
       <Card style={{marginTop: 10}}>

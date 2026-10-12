@@ -9,6 +9,7 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CaptureRequest as CR
 import android.media.Image
 import android.media.ImageReader
 import android.os.Handler
@@ -18,6 +19,7 @@ import android.util.Range
 import com.facebook.react.bridge.*
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import java.io.ByteArrayOutputStream
+import org.json.JSONObject
 
 /**
  * Module natif CAMÉRA ASTRONOMIQUE (v2.5.0 — demande utilisateur : « je veux
@@ -63,6 +65,9 @@ class UsbCameraModule(reactContext: ReactApplicationContext) :
   private var thread: HandlerThread? = null
   private var handler: Handler? = null
   private var activeId: String? = null
+  /** Requête répétée courante (réglages manuels setParams2 — re-appliqués
+   *  par setRepeatingRequest sans rouvrir le flux). */
+  private var lastBuilder: android.hardware.camera2.CaptureRequest.Builder? = null
   private var frameSkip = 1          // 1 frame émise sur N
   private var frameCount = 0L
   private var jpegQuality = 70
@@ -328,6 +333,7 @@ class UsbCameraModule(reactContext: ReactApplicationContext) :
                     set(android.hardware.camera2.CaptureRequest.CONTROL_MODE,
                         android.hardware.camera2.CaptureRequest.CONTROL_MODE_AUTO)
                   }
+                  lastBuilder = req
                   s.setRepeatingRequest(req.build(), null, handler)
                   activeId = cameraId
                   promise.resolve(true)
@@ -386,6 +392,155 @@ class UsbCameraModule(reactContext: ReactApplicationContext) :
     }
   }
 
+  /** Plages de réglages de la caméra Camera2 (cameraId) — alimente les
+   *  curseurs du panneau « Réglages manuels » (v2.7.0). Réponse :
+   *  {manual, iso:{min,max,def}, exposureMs:{min,max,def}, ev:{min,max,step},
+   *   zoomMax, focusMin, wbModes:[…], fps:{min,max}} — min/max en unités JS
+   *  (ms, ISO, EV pas). */
+  @ReactMethod
+  fun getRanges2(cameraId: String, promise: Promise) {
+    try {
+      val mgr = cameraManager ?: return promise.reject("CAM", "CameraManager indisponible")
+      val ch = mgr.getCameraCharacteristics(cameraId)
+      val out = Arguments.createMap()
+      val lvl = ch.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL)
+          ?: CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY
+      out.putBoolean("manual", lvl == CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_3 ||
+          lvl == CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_FULL)
+      fun rng(key: String, lo: Long, hi: Long, def: Double, scale: Double) {
+        val m = Arguments.createMap()
+        m.putDouble("min", lo * scale); m.putDouble("max", hi * scale); m.putDouble("def", def)
+        out.putMap(key, m)
+      }
+      val iso = ch.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
+      if (iso != null) rng("iso", iso.lower.toLong(), iso.upper.toLong(), 400.0, 1.0)
+      val expo = ch.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
+      if (expo != null) {
+        // ns → ms (plafond 30 s affichable)
+        rng("exposureMs", expo.lower / 1_000_000L, expo.upper / 1_000_000L,
+            (expo.lower / 1_000_000L).toDouble(), 1.0)
+      }
+      val ev = ch.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
+      if (ev != null) {
+        val m = Arguments.createMap()
+        m.putDouble("min", ev.lower.toDouble()); m.putDouble("max", ev.upper.toDouble())
+        m.putDouble("step", ch.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)?.toFloat()?.toDouble() ?: 1.0)
+        out.putMap("ev", m)
+      }
+      val zoomMaxR = ch.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM)
+      out.putDouble("zoomMax", (zoomMaxR ?: 1f).toDouble())
+      val focusMin = ch.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE)
+      out.putDouble("focusMin", (focusMin ?: 0f).toDouble())
+      val wbModes = Arguments.createArray()
+      ch.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES)?.forEach { m ->
+        wbModes.pushInt(m)
+      }
+      out.putArray("wbModes", wbModes)
+      promise.resolve(out)
+    } catch (e: Exception) {
+      promise.reject("RANGES", e.message, e)
+    }
+  }
+
+  /** Réglages manuels Camera2 (JSON string — règle de survie Hermes).
+   *  Clés : exposureMode('auto'|'manual'), exposureMs, iso, exposureComp,
+   *  wbMode ('auto'|'incandescent'|'fluorescent'|'warmFluorescent'|
+   *  'daylight'|'cloudy'|'twilight'|'shade'), zoom (0..1 → ratio),
+   *  focusMode('auto'|'manual'), focusDistance (dioptres).
+   *  Réponse : {applied:[…], failed:[…]} comme le côté UVC. */
+  @ReactMethod
+  fun setParams2(json: String, promise: Promise) {
+    try {
+      val s = session ?: return promise.reject("NOSESSION", "Aucun flux actif")
+      val dev = device ?: return promise.reject("NOSESSION", "Aucun flux actif")
+      val b = lastBuilder ?: return promise.reject("NOSESSION", "Aucun flux actif")
+      val o = JSONObject(json)
+      val applied = Arguments.createArray()
+      val failed = Arguments.createArray()
+      fun apply(key: String, body: () -> Unit) {
+        try { body(); applied.pushString(key) } catch (_: Exception) { failed.pushString(key) }
+      }
+
+      if (o.has("exposureMode")) {
+        val manual = o.getString("exposureMode") == "manual"
+        apply("exposureMode") {
+          b.set(CR.CONTROL_AE_MODE,
+              if (manual) CR.CONTROL_AE_MODE_OFF else CR.CONTROL_AE_MODE_ON)
+        }
+      }
+      if (o.has("exposureMs")) {
+        val ns = (o.getDouble("exposureMs") * 1e6).toLong()
+        apply("exposureMs") { b.set(CR.SENSOR_EXPOSURE_TIME, ns) }
+      }
+      if (o.has("iso")) {
+        apply("iso") { b.set(CR.SENSOR_SENSITIVITY, o.getInt("iso")) }
+      }
+      if (o.has("exposureComp")) {
+        apply("exposureComp") { b.set(CR.CONTROL_AE_EXPOSURE_COMPENSATION, o.getInt("exposureComp")) }
+      }
+      if (o.has("wbMode")) {
+        val v = when (o.getString("wbMode")) {
+          "incandescent" -> CR.CONTROL_AWB_MODE_INCANDESCENT
+          "fluorescent" -> CR.CONTROL_AWB_MODE_FLUORESCENT
+          "warmFluorescent" -> CR.CONTROL_AWB_MODE_WARM_FLUORESCENT
+          "daylight" -> CR.CONTROL_AWB_MODE_DAYLIGHT
+          "cloudy" -> CR.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT
+          "twilight" -> CR.CONTROL_AWB_MODE_TWILIGHT
+          "shade" -> CR.CONTROL_AWB_MODE_SHADE
+          else -> CR.CONTROL_AWB_MODE_AUTO
+        }
+        apply("wbMode") { b.set(CR.CONTROL_AWB_MODE, v) }
+      }
+      if (o.has("zoom")) {
+        val z = o.getDouble("zoom").coerceIn(0.0, 1.0).toFloat()
+        apply("zoom") {
+          // zoom MAX depuis les caractéristiques de la caméra active
+          var maxZ = 1f
+          val id = activeId
+          if (id != null) {
+            try {
+              val ch = cameraManager?.getCameraCharacteristics(id)
+              maxZ = ch?.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1f
+            } catch (_: Exception) { maxZ = 1f }
+          }
+          if (android.os.Build.VERSION.SDK_INT >= 30 && maxZ > 1f) {
+            b.set(CR.CONTROL_ZOOM_RATIO, 1f + z * (maxZ - 1f))
+          } else {
+            val rect = b.get(CR.SCALER_CROP_REGION)
+            if (rect != null) {
+              val zoom = 1f + z * 3f
+              val w = (rect.width() / zoom).toInt()
+              val h = (rect.height() / zoom).toInt()
+              b.set(CR.SCALER_CROP_REGION, android.graphics.Rect(
+                  rect.centerX() - w / 2, rect.centerY() - h / 2,
+                  rect.centerX() + w / 2, rect.centerY() + h / 2))
+            }
+          }
+        }
+      }
+      if (o.has("focusMode")) {
+        val manual = o.getString("focusMode") == "manual"
+        apply("focusMode") {
+          b.set(CR.CONTROL_AF_MODE, if (manual) CR.CONTROL_AF_MODE_OFF else CR.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+        }
+      }
+      if (o.has("focusDistance")) {
+        apply("focusDistance") { b.set(CR.LENS_FOCUS_DISTANCE, o.getDouble("focusDistance").toFloat()) }
+      }
+      try {
+        s.setRepeatingRequest(b.build(), null, handler)
+        val out = Arguments.createMap()
+        out.putArray("applied", applied)
+        out.putArray("failed", failed)
+        promise.resolve(out)
+      } catch (e: Exception) {
+        promise.reject("PARAMS", e.message, e)
+      }
+    } catch (e: Exception) {
+      promise.reject("PARAMS", e.message, e)
+    }
+  }
+
   /** UNE pose (qualité 95) — resolve la base64 du JPEG. */
   @ReactMethod
   fun captureStill(promise: Promise) {
@@ -438,6 +593,7 @@ class UsbCameraModule(reactContext: ReactApplicationContext) :
     try { device?.close() } catch (_: Exception) {}
     try { reader?.close() } catch (_: Exception) {}
     session = null; device = null; reader = null; activeId = null
+    lastBuilder = null
     pendingStill?.let { it.reject("CLOSED", "Flux fermé") }
     pendingStill = null
     synchronized(lumaRing) { lumaRing.clear() }

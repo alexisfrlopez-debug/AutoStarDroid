@@ -138,12 +138,15 @@ export function SetupScreen() {
       <Card style={{marginTop: 12}}>
         <Title text={t.setup.about} />
         <Text style={{color: c.textDim, fontSize: 13, lineHeight: 19}}>
-          AutoStar Droid v2.6.0 — émulation complète de la raquette Meade Autostar II
+          AutoStar Droid v2.7.0 — émulation complète de la raquette Meade Autostar II
           et des Autostar #49x, liaisons Wi-Fi, Bluetooth SPP, USB-série (câble Meade
           #505/#507, FTDI, PL2303, CP210x, CH340), GOTO avec catalogues
           Messier/NGC/étoiles/planètes, carte du ciel interactive (vue chercheur,
           noms cliquables GOTO/Sync, montage du téléphone sur le tube),
-          contrôle croisé GOTO télémétrie/moteurs avec garde de fluidité,
+          caméra astronomique UVC USB-host + interne avec réglages manuels,
+          autoguidage par l'image et acquisition automatique, onglet Montures
+          (catalogue multi-marques Meade/Celestron/Sky-Watcher/iOptron et plus,
+          saisie manuelle), contrôle croisé GOTO télémétrie/moteurs,
           alignement télémétrique (gyroscope/boussole), diagnostic moteur complet
           adapté à la monture, mise à jour automatique de la raquette (date, heure,
           site) à la connexion et reconnexion automatique USB/Bluetooth.

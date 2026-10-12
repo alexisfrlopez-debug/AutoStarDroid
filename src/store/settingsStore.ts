@@ -5,6 +5,7 @@ import type {MountPresetId} from '../services/astro/mounts';
 import type {PhoneAngle, PhonePose, PhonePosition} from '../services/astro/phonemount';
 import type {GuidingAxes} from '../services/astro/guiding';
 import type {DriverPref} from '../services/protocol/driver';
+import type {CustomMount} from '../services/mounts/catalog';
 
 export type Lang = 'en' | 'fr';
 export type ScopeModelId = 'autostar2' | 'autostar497' | 'autostar495' | 'autostar494' | 'lx200';
@@ -56,6 +57,11 @@ interface SettingsState {
   /** PROTOCOLE (v2.6.0) : 'auto' = sondes de détection à la connexion,
    *  sinon la marque imposée (Meade, Celestron NexStar, SynScan, iOptron). */
   prefDriver: DriverPref;
+  /** MONTURES (v2.7.0) : sélection catalogue (marque + modèle, onglet
+   *  « Montures ») et saisie manuelle (caractéristiques libres). */
+  mountBrandId: string | null;
+  mountModelId: string | null;
+  customMount: CustomMount | null;
   setLanguage: (l: Lang) => void;
   setNightVision: (v: boolean) => void;
   setKeySounds: (v: boolean) => void;
@@ -76,6 +82,8 @@ interface SettingsState {
   setGuideAxes: (a: GuidingAxes) => void;
   setGuideScale: (s: number) => void;
   setPrefDriver: (d: DriverPref) => void;
+  setMountSelection: (brandId: string | null, modelId: string | null) => void;
+  setCustomMount: (c: CustomMount | null) => void;
 }
 
 export const useSettingsStore = create<SettingsState>()(
@@ -101,6 +109,9 @@ export const useSettingsStore = create<SettingsState>()(
       guideAxes: {xAxis: 'ra', flipX: false, flipY: false},
       guideScaleArcsecPerPx: 2,
       prefDriver: 'auto',
+      mountBrandId: null,
+      mountModelId: null,
+      customMount: null,
       setLanguage: (language) => set({language}),
       setNightVision: (nightVision) => set({nightVision}),
       setKeySounds: (keySounds) => set({keySounds}),
@@ -121,6 +132,9 @@ export const useSettingsStore = create<SettingsState>()(
       setGuideAxes: (guideAxes) => set({guideAxes}),
       setGuideScale: (guideScaleArcsecPerPx) => set({guideScaleArcsecPerPx}),
       setPrefDriver: (prefDriver) => set({prefDriver}),
+      setMountSelection: (mountBrandId, mountModelId) =>
+        set({mountBrandId, mountModelId, customMount: null}),
+      setCustomMount: (customMount) => set({customMount}),
     }),
     {
       name: 'autostardroid-settings',

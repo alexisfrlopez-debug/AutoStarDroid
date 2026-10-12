@@ -18,7 +18,7 @@ import {autostar} from '../protocol/client';
 import {useScopeStore} from '../../store/scopeStore';
 import {useSettingsStore} from '../../store/settingsStore';
 import {useMotorCalibStore, type MotorSpeed, type MeasuredRates} from '../../store/motorCalibStore';
-import {resolvePreset} from '../astro/mounts';
+import {activePreset as resolveActivePreset} from '../mounts/catalog';
 import {startGyro, type GyroEvent} from '../phone/sensors';
 import {
   gyroBiasDegPerSec,
@@ -192,7 +192,10 @@ export async function measureBacklash(
   // v2.3.0 : repli = taux center du PRESET de la monture choisie (un DS-114
   // est lent : 0,053°/s — plus de 0,08°/s universel qui faussait la
   // conversion en secondes d'arc sur les montures à pignons).
-  const preset = resolvePreset(useSettingsStore.getState().mountPreset, useScopeStore.getState().model);
+  const st = useSettingsStore.getState();
+  const preset = resolveActivePreset(
+      st.mountBrandId, st.mountModelId, st.customMount,
+      useScopeStore.getState().model, st.mountPreset);
   const rateDegPerSec =
     (mc.rates?.speed === speed ? (axis === 'ra' ? mc.rates.e ?? mc.rates.w : mc.rates.n ?? mc.rates.s) : null) ??
     preset.expectedRates.center;

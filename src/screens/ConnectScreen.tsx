@@ -6,6 +6,7 @@ import {useSettingsStore, ScopeModelId} from '../store/settingsStore';
 import {useScopeStore} from '../store/scopeStore';
 import {autostar} from '../services/protocol/client';
 import type {DriverPref} from '../services/protocol/driver';
+import {resolveMountConfig} from '../services/mounts/catalog';
 import {UsbSerialNative, UsbDeviceInfo, BluetoothSppNative} from '../services/connection';
 import {PROFILES} from '../services/protocol/profiles';
 import {FW_SHORT} from '../services/protocol/keymaps';
@@ -37,9 +38,10 @@ export function ConnectScreen() {
   const t = useT();
   const c = usePal();
   const model = useSettingsStore((s) => s.model);
-  const setModel = useSettingsStore((s) => s.setModel);
   const prefDriver = useSettingsStore((s) => s.prefDriver);
-  const setPrefDriver = useSettingsStore((s) => s.setPrefDriver);
+  const mountBrandId = useSettingsStore((s) => s.mountBrandId);
+  const mountModelId = useSettingsStore((s) => s.mountModelId);
+  const customMount = useSettingsStore((s) => s.customMount);
   const driverId = useScopeStore((s) => s.driverId);
   const lastWifi = useSettingsStore((s) => s.lastWifi);
   const setLastWifi = useSettingsStore((s) => s.setLastWifi);
@@ -62,8 +64,12 @@ export function ConnectScreen() {
   const [fwDetecting, setFwDetecting] = useState(false);
   const [err, setErr] = useState('');
   const connected = connStatus === 'connected';
-  /** Configuration active : firmware détecté en priorité, choix de l'onglet en secours. */
-  const activeModel: ScopeModelId = fwModel ?? model;
+  /** Configuration active : firmware détecté en priorité, monture de
+   *  l'onglet Montures ensuite, réglages historiques en dernier repli. */
+  const mountSelected = mountBrandId !== null || mountModelId !== null || customMount !== null;
+  const cfg = resolveMountConfig(mountBrandId, mountModelId, customMount);
+  const activeModel: ScopeModelId = fwModel ?? (mountSelected ? cfg.interfaceId : model);
+  const activeDriverPref: DriverPref = mountSelected ? cfg.driverPref : prefDriver;
 
   /** Re-lance la détection du firmware sur la liaison courante. */
   const redetect = async () => {
@@ -110,7 +116,7 @@ export function ConnectScreen() {
         tab === 'bluetooth' ? {bluetooth: {address: lastBt}} :
         tab === 'usb' ? {usb: {deviceName: lastUsb, baud: 9600}} :
         {demo: {}};
-      await autostar.connect(tab, opts, model, prefDriver);
+      await autostar.connect(tab, opts, activeModel, activeDriverPref);
       if (tab === 'wifi') setLastWifi({host: host.trim(), port: parseInt(port, 10) || 4030});
       // firmware : lu en arrière-plan par autostar.detectFirmware() → store
     } catch (e) {
@@ -126,7 +132,6 @@ export function ConnectScreen() {
     setBusy(false);
   };
 
-  const modelKeys: ScopeModelId[] = ['autostar2', 'autostar497', 'autostar495', 'autostar494', 'lx200'];
   const driverOpts: Array<{id: DriverPref; label: string}> = [
     {id: 'auto', label: t.connect.driverAuto},
     {id: 'meade', label: t.connect.driverMeade},
@@ -138,78 +143,24 @@ export function ConnectScreen() {
   return (
     <ScrollView style={{flex: 1, backgroundColor: c.bg}} contentContainerStyle={{padding: 12, paddingBottom: 40}}>
       <StatusHeader />
+      {/* Monture : SOURCE UNIQUE = onglet Montures (v2.7.0 — fin des
+          cartes protocole/modèle redondantes ici). */}
       <Card style={{marginTop: 8}}>
-        <Title text={t.connect.driver} />
-        <Text style={{color: c.textFaint, fontSize: 11, marginBottom: 6, lineHeight: 15}}>
-          {t.connect.driverHint}
+        <Title text={t.connect.mountTitle} />
+        {mountSelected ? (
+          <Text style={{color: c.text, fontSize: 15, fontWeight: '700'}}>
+            {cfg.brandLabel !== '—' ? `${cfg.brandLabel} · ` : ''}{cfg.modelLabel}
+          </Text>
+        ) : (
+          <Text style={{color: c.textDim, fontSize: 13}}>{t.connect.mountNone}</Text>
+        )}
+        <Text style={{color: c.blue, fontSize: 12, marginTop: 4, fontWeight: '600'}}>
+          {t.connect.proto} : {driverOpts.find((o) => o.id === activeDriverPref)?.label ?? ''}
+          {driverId ? ` · ${t.connect.fwAutoBadge}` : ''}
         </Text>
-        {driverOpts.map((o) => {
-          const on = prefDriver === o.id;
-          const detected = o.id !== 'auto' && driverId === o.id;
-          return (
-            <TouchableOpacity key={o.id} onPress={() => setPrefDriver(o.id)}
-              style={{flexDirection: 'row', alignItems: 'center', paddingVertical: 8}}>
-              <View style={{
-                width: 18, height: 18, borderRadius: 9, borderWidth: 2,
-                borderColor: on ? c.amber : c.textFaint,
-                alignItems: 'center', justifyContent: 'center', marginRight: 10,
-              }}>
-                {on ? <View style={{width: 8, height: 8, borderRadius: 4, backgroundColor: c.amber}} /> : null}
-              </View>
-              <Text style={{color: c.text, fontSize: 15, fontWeight: '600'}}>{o.label}</Text>
-              {detected ? (
-                <View style={{
-                  marginLeft: 8, borderRadius: 6, borderWidth: 1,
-                  backgroundColor: 'rgba(63,214,140,0.12)', borderColor: 'rgba(63,214,140,0.5)',
-                  paddingHorizontal: 6, paddingVertical: 1,
-                }}>
-                  <Text style={{color: c.green, fontSize: 9, fontWeight: '800', letterSpacing: 0.6}}>
-                    {t.connect.fwAutoBadge}
-                  </Text>
-                </View>
-              ) : null}
-            </TouchableOpacity>
-          );
-        })}
-      </Card>
-
-      <Card style={{marginTop: 12}}>
-        <Title text={t.connect.model} />
-        <Text style={{color: c.textFaint, fontSize: 11, marginBottom: 6, lineHeight: 15}}>
-          {t.connect.modelHint}
+        <Text style={{color: c.textFaint, fontSize: 11, marginTop: 6, lineHeight: 16}}>
+          {t.connect.mountHint}
         </Text>
-        {modelKeys.map((m) => {
-          const p = PROFILES[m];
-          return (
-            <TouchableOpacity key={m} onPress={() => setModel(m)}
-              style={{flexDirection: 'row', alignItems: 'center', paddingVertical: 8}}>
-              <View style={{
-                width: 18, height: 18, borderRadius: 9, borderWidth: 2,
-                borderColor: model === m ? c.amber : c.textFaint,
-                alignItems: 'center', justifyContent: 'center', marginRight: 10,
-              }}>
-                {model === m ? <View style={{width: 8, height: 8, borderRadius: 4, backgroundColor: c.amber}} /> : null}
-              </View>
-              <View style={{flex: 1}}>
-                <View style={{flexDirection: 'row', alignItems: 'center'}}>
-                  <Text style={{color: c.text, fontSize: 15, fontWeight: '600'}}>{t.models[m]}</Text>
-                  {fwModel === m ? (
-                    <View style={{
-                      marginLeft: 8, borderRadius: 6, borderWidth: 1,
-                      backgroundColor: 'rgba(63,214,140,0.12)', borderColor: 'rgba(63,214,140,0.5)',
-                      paddingHorizontal: 6, paddingVertical: 1,
-                    }}>
-                      <Text style={{color: c.green, fontSize: 9, fontWeight: '800', letterSpacing: 0.6}}>
-                        {t.connect.fwAutoBadge}
-                      </Text>
-                    </View>
-                  ) : null}
-                </View>
-                <Text style={{color: c.textDim, fontSize: 11, marginTop: 1}}>{p.hints}</Text>
-              </View>
-            </TouchableOpacity>
-          );
-        })}
       </Card>
 
       <Card style={{marginTop: 12}}>

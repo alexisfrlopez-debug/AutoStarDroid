@@ -14,13 +14,12 @@
     <!-- Retour haptique des touches (réglage « Sons clavier ») -->
     <uses-permission android:name="android.permission.VIBRATE" />
 
-    <!-- Caméra astronomique (UVC externe via Camera2 ou caméra interne en secours) -->
+    <!-- Caméra astronomique (UVC USB-host v2.7.0 ou caméra interne en secours) -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
     <uses-feature android:name="android.hardware.camera.external" android:required="false" />
-    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
 
-    <!-- Hôte USB (câble Meade USB-série #505/507) -->
+    <!-- Hôte USB (câble Meade USB-série #505/507 + caméras UVC) -->
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
 
     <application
