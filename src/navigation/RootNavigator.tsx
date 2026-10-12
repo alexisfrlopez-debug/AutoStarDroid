@@ -14,6 +14,7 @@ import {SkyScreen} from '../screens/SkyScreen';
 import {CameraScreen} from '../screens/CameraScreen';
 import {AlignScreen} from '../screens/AlignScreen';
 import {MountsScreen} from '../screens/MountsScreen';
+import {ServicesScreen} from '../screens/ServicesScreen';
 import {SetupScreen} from '../screens/SetupScreen';
 import {ConnectScreen} from '../screens/ConnectScreen';
 import {HandboxScreen} from '../screens/HandboxScreen';
@@ -65,6 +66,8 @@ function MainTabs() {
         options={{tabBarLabel: t.tabs.align, tabBarIcon: ({color, focused}) => <TabIcon glyph="◎" focused={focused} color={color} />}} />
       <Tabs.Screen name="Mounts" component={guarded('Montures', MountsScreen)}
         options={{tabBarLabel: t.tabs.mounts, tabBarIcon: ({color, focused}) => <TabIcon glyph="⌾" focused={focused} color={color} />}} />
+      <Tabs.Screen name="Services" component={guarded('Services', ServicesScreen)}
+        options={{tabBarLabel: t.tabs.services, tabBarIcon: ({color, focused}) => <TabIcon glyph="⌖" focused={focused} color={color} />}} />
       <Tabs.Screen name="Handbox" component={guarded('Raquette', HandboxScreen)}
         options={{tabBarLabel: t.tabs.handbox, tabBarIcon: ({color, focused}) => <TabIcon glyph="▤" focused={focused} color={color} />}} />
       <Tabs.Screen name="Setup" component={guarded('Réglages', SetupScreen)}

@@ -1,6 +1,6 @@
 {
   "name": "autostardroid",
-  "version": "2.8.1",
+  "version": "2.9.0",
   "private": true,
   "displayName": "AutoStar Droid",
   "scripts": {
@@ -23,6 +23,7 @@
     "react-native-screens": "^3.34.0",
     "react-native-svg": "^15.15.5",
     "react-native-tcp-socket": "^6.0.6",
+    "react-native-webview": "^13.12.5",
     "zustand": "^4.5.5"
   },
   "devDependencies": {
