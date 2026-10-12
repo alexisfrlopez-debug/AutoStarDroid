@@ -78,6 +78,7 @@ export function ObjectScreen({navigation}: {navigation: {navigate: (s: string) =
         const msg = gotoErrorText(r, {
           belowHorizon: t.objects.belowHorizon, empty: t.objects.empty,
           gotoNoLink: t.errors.gotoNoLink, gotoMute: t.errors.gotoMute, refused: t.errors.refused,
+          relayPartial: t.errors.relayPartial,
         });
         if (msg) Alert.alert(t.common.error, msg);
       } else {

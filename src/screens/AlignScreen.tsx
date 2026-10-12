@@ -69,6 +69,7 @@ export function AlignScreen() {
         Alert.alert(t.common.error, gotoErrorText(r, {
           belowHorizon: t.objects.belowHorizon, empty: t.objects.empty,
           gotoNoLink: t.errors.gotoNoLink, gotoMute: t.errors.gotoMute, refused: t.errors.refused,
+          relayPartial: t.errors.relayPartial,
         }));
         return;
       }

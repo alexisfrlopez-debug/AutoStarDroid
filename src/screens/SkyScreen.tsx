@@ -30,7 +30,7 @@
  *   le verdict de fluidité (gotocheck) — une télémétrie instable BLOQUE le
  *   réglage fin automatique (cf. fineTune.ts).
  */
-import {useEffect, useMemo, useRef, useState} from 'react';
+import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {
   View, Text, Modal, PanResponder, Alert, TouchableOpacity,
 } from 'react-native';
@@ -46,6 +46,10 @@ import {
   projectView, fovCircleRadiusPx, panCenter, layoutLabels,
   type ViewGeometry, type PlacedItem, type LabelLayout,
 } from '../services/astro/skyview';
+import {
+  starVisual, planetColor, discRadiusPx, asterismSegments, horizonAzSamples,
+} from '../services/astro/skyrender';
+import Svg, {Circle, Line, Rect, Defs, RadialGradient, Stop} from 'react-native-svg';
 import {
   tubeAltAzFromOrientation, isDefaultMount,
   type PhoneMountConfig, type PhonePose, type PhoneAngle, type PhonePosition,
@@ -200,6 +204,15 @@ export function SkyScreen({navigation}: {navigation?: {navigate: (s: string) => 
   const liveLabels = useRef(labelMap);
   liveLabels.current = labelMap;
 
+  // ---------- RENDU EMBELLI (v2.5.0) — calculs purs ----------
+  /** Échelle px/deg au centre (projection gnomonique : tan). */
+  const pxPerDeg = useMemo(() => {
+    const rad = Math.PI / 180;
+    return (size.w / 2 / Math.tan((FOV_DEG[fov] / 2) * rad)) * (1 * rad);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [size.w, fov]);
+  const segments = useMemo(() => asterismSegments(placed as Array<PlacedItem<DisplayObject>>), [placed]);
+
   // Pan + tap (PanResponder : glisser = explorer, tap = sélection)
   const drag = useRef<{x: number; y: number; moved: boolean} | null>(null);
   const pan = useRef(PanResponder.create({
@@ -265,6 +278,7 @@ export function SkyScreen({navigation}: {navigation?: {navigate: (s: string) => 
       const msg = gotoErrorText(r, {
         belowHorizon: t.objects.belowHorizon, empty: t.objects.empty,
         gotoNoLink: t.errors.gotoNoLink, gotoMute: t.errors.gotoMute, refused: t.errors.refused,
+          relayPartial: t.errors.relayPartial,
       });
       if (msg) Alert.alert(t.common.error, msg);
     } catch (e) {
@@ -389,7 +403,7 @@ export function SkyScreen({navigation}: {navigation?: {navigate: (s: string) => 
         )}
       </Card>
 
-      {/* ---------- CIEL ---------- */}
+      {/* ---------- CIEL (rendu SVG v2.5.0) ---------- */}
       <View
         {...pan.panHandlers}
         onLayout={(e) => setSize({w: e.nativeEvent.layout.width, h: e.nativeEvent.layout.height})}
@@ -397,39 +411,102 @@ export function SkyScreen({navigation}: {navigation?: {navigate: (s: string) => 
           flex: 1, borderRadius: 14, borderWidth: 1, borderColor: c.border,
           backgroundColor: '#04060C', overflow: 'hidden', marginTop: 2,
         }}>
-        {/* réticule chercheur : cercle de champ VRAI + cercle externe + croix */}
-        <View style={{
-          position: 'absolute', left: size.w / 2 - finderR, top: size.h / 2 - finderR,
-          width: finderR * 2, height: finderR * 2, borderRadius: finderR,
-          borderWidth: 1, borderColor: 'rgba(232,184,75,0.85)',
-        }} pointerEvents="none" />
-        <View style={{
-          position: 'absolute', left: size.w / 2 - reticleR, top: size.h / 2 - reticleR,
-          width: reticleR * 2, height: reticleR * 2, borderRadius: reticleR,
-          borderWidth: 1, borderColor: 'rgba(232,184,75,0.30)',
-        }} pointerEvents="none" />
-        <View style={{position: 'absolute', left: size.w / 2 - cross / 2, top: size.h / 2 - 0.5, width: cross, height: 1, backgroundColor: 'rgba(232,184,75,0.7)'}} pointerEvents="none" />
-        <View style={{position: 'absolute', left: size.w / 2 - 0.5, top: size.h / 2 - cross / 2, width: 1, height: cross, backgroundColor: 'rgba(232,184,75,0.7)'}} pointerEvents="none" />
+        <Svg width={size.w} height={size.h} style={{position: 'absolute', left: 0, top: 0}}>
+          <Defs>
+            <RadialGradient id="skyGlow" cx="50%" cy="46%" rx="80%" ry="80%">
+              <Stop offset="0%" stopColor="#0B1328" stopOpacity="1" />
+              <Stop offset="55%" stopColor="#060A18" stopOpacity="1" />
+              <Stop offset="100%" stopColor="#02040A" stopOpacity="1" />
+            </RadialGradient>
+          </Defs>
+          {/* fond : vignette nuit profonde */}
+          <Rect x={0} y={0} width={size.w} height={size.h} fill="url(#skyGlow)" />
 
-        {/* cible de suivi : anneau vert */}
-        {targetMark ? (
-          <View style={{
-            position: 'absolute', left: targetMark.x - 11, top: targetMark.y - 11,
-            width: 22, height: 22, borderRadius: 11, borderWidth: 1.5, borderColor: c.green,
-          }} pointerEvents="none" />
-        ) : null}
+          {/* arc d'horizon (alt 0°) — bleu discret, jamais dominant */}
+          {(() => {
+            const pts = projectView(horizonAzSamples(), geom);
+            const lines: React.ReactNode[] = [];
+            for (let i = 1; i < pts.length; i++) {
+              const a = pts[i - 1]; const b = pts[i];
+              if (a.visible && b.visible && a.x != null && b.x != null) {
+                lines.push(<Line key={`hz-${i}`} x1={a.x} y1={a.y} x2={b.x} y2={b.y}
+                  stroke="rgba(79,163,255,0.30)" strokeWidth={1.4} />);
+              }
+            }
+            return lines;
+          })()}
 
-        {/* objets : points */}
-        {(placed as Array<PlacedItem<DisplayObject>>).map((p) => {
-          const sz = dotSize(p.item.mag);
-          const col = p.item.type === 'PLANET' || p.item.type === 'MOON' || p.item.type === 'SUN' ? c.green
-            : p.item.type === 'STAR' || p.item.type === 'DOUBLE_STAR' ? '#DDE4EE'
-            : c.amber;
-          return (
-            <View key={p.item.id} pointerEvents="none"
-              style={{position: 'absolute', left: p.x - sz / 2, top: p.y - sz / 2, width: sz, height: sz, borderRadius: sz / 2, backgroundColor: col, opacity: 0.95}} />
-          );
-        })}
+          {/* astérismes : lignes fines entre étoiles du catalogue */}
+          {segments.map((sg, i) => (
+            <Line key={`ast-${i}`} x1={sg.x1} y1={sg.y1} x2={sg.x2} y2={sg.y2}
+              stroke="rgba(143,160,191,0.30)" strokeWidth={0.9} />
+          ))}
+
+          {/* étoiles & objets : halos puis noyaux (placed = pâles d'abord) */}
+          {(placed as Array<PlacedItem<DisplayObject>>).map((p) => {
+            const it = p.item;
+            const moving = it.type === 'PLANET' || it.type === 'MOON' || it.type === 'SUN';
+            if (moving) {
+              const col = planetColor(it.id);
+              const r = it.type === 'MOON' || it.type === 'SUN'
+                ? discRadiusPx(31, pxPerDeg)
+                : Math.max(3.4, 4.6 - Math.min(it.mag, 2));
+              return (
+                <React.Fragment key={it.id}>
+                  <Circle cx={p.x} cy={p.y} r={r * 2.6} fill={col} opacity={0.16} />
+                  <Circle cx={p.x} cy={p.y} r={r * 1.5} fill={col} opacity={0.22} />
+                  <Circle cx={p.x} cy={p.y} r={r} fill={col} opacity={0.97} />
+                </React.Fragment>
+              );
+            }
+            if (it.type === 'STAR' || it.type === 'DOUBLE_STAR' || it.type === 'ASTERISM') {
+              const v = starVisual(it.mag);
+              return (
+                <React.Fragment key={it.id}>
+                  <Circle cx={p.x} cy={p.y} r={v.glowR} fill={v.color} opacity={v.glowOpacity} />
+                  <Circle cx={p.x} cy={p.y} r={v.glowR * 0.55} fill={v.color} opacity={v.glowOpacity + 0.10} />
+                  <Circle cx={p.x} cy={p.y} r={v.coreR} fill={v.color} opacity={0.98} />
+                </React.Fragment>
+              );
+            }
+            // ciel profond : cercle de taille apparente + cœur ambré
+            const r = it.sizeMin ? discRadiusPx(it.sizeMin, pxPerDeg) : 5;
+            return (
+              <React.Fragment key={it.id}>
+                <Circle cx={p.x} cy={p.y} r={r} fill="none" stroke={c.amber} strokeOpacity={0.55} strokeWidth={1} strokeDasharray="2 2.5" />
+                <Circle cx={p.x} cy={p.y} r={Math.max(1.6, r * 0.22)} fill={c.amber} opacity={0.8} />
+              </React.Fragment>
+            );
+          })}
+
+          {/* réticule chercheur : cercle de champ VRAI + cercle externe + croix */}
+          <Circle cx={size.w / 2} cy={size.h / 2} r={finderR} fill="none"
+            stroke="rgba(232,184,75,0.85)" strokeWidth={1.2} />
+          <Circle cx={size.w / 2} cy={size.h / 2} r={reticleR} fill="none"
+            stroke="rgba(232,184,75,0.28)" strokeWidth={1} strokeDasharray="3 6" />
+          {(() => {
+            const cx = size.w / 2; const cy = size.h / 2; const g = 9;
+            const L = cross * 2.1;
+            return (
+              <React.Fragment>
+                <Line x1={cx - g - L} y1={cy} x2={cx - g} y2={cy} stroke="rgba(232,184,75,0.7)" strokeWidth={1} />
+                <Line x1={cx + g} y1={cy} x2={cx + g + L} y2={cy} stroke="rgba(232,184,75,0.7)" strokeWidth={1} />
+                <Line x1={cx} y1={cy - g - L} x2={cx} y2={cy - g} stroke="rgba(232,184,75,0.7)" strokeWidth={1} />
+                <Line x1={cx} y1={cy + g} x2={cx} y2={cy + g + L} stroke="rgba(232,184,75,0.7)" strokeWidth={1} />
+              </React.Fragment>
+            );
+          })()}
+
+          {/* cible de suivi : double anneau vert */}
+          {targetMark ? (
+            <React.Fragment>
+              <Circle cx={targetMark.x} cy={targetMark.y} r={11} fill="none"
+                stroke={c.green} strokeWidth={1.5} />
+              <Circle cx={targetMark.x} cy={targetMark.y} r={16.5} fill="none"
+                stroke={c.green} strokeOpacity={0.35} strokeWidth={1} />
+            </React.Fragment>
+          ) : null}
+        </Svg>
 
         {/* étiquettes horizontales (v2.4.0) : TOUJOURS horizontales,
             posées à côté des points, zone cliquable gérée par le tap */}
@@ -441,7 +518,7 @@ export function SkyScreen({navigation}: {navigation?: {navigate: (s: string) => 
               position: 'absolute', left: (lay as LabelLayout).x, top: (lay as LabelLayout).y,
               width: (lay as LabelLayout).w,
             }}>
-            <Text numberOfLines={1} style={{color: c.textDim, fontSize: 9}}>
+            <Text numberOfLines={1} style={{color: '#A7B6D4', fontSize: 9, textShadowColor: '#000', textShadowRadius: 3}}>
               {item.name}
             </Text>
           </View>

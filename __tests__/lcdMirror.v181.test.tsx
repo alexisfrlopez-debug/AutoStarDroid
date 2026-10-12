@@ -180,7 +180,9 @@ describe('v1.8.1 — AutostarClient : :ED#, :EK#, GO TO robuste', () => {
   test('gotoRaDec : les deux formats refusés → refused (pas de :MS)', async () => {
     ({client, tp} = await connectedClient());
     tp.replies.push({match: /^:Sr/, reply: '0#'});
-    const r = await client.gotoRaDec(82.75, 22.0147);
+    // v2.5.0 : sémantique du chemin DIRECT (gotoRaDecInner) — le relais est
+    // testé dans gotoRelay.e2e.v250
+    const r = await (client as any).gotoRaDecInner(82.75, 22.0147);
     expect(r).toBe('refused');
     expect(tp.writes.some((w) => w === ':MS#')).toBe(false);
   });

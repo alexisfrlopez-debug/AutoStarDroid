@@ -10,17 +10,26 @@ import {UsbTransport, UsbSerialNative} from '../connection/usb';
 import {DemoTransport, setDemoSite} from '../connection/demo';
 import {SPEED_CMDS} from './profiles';
 import {proto, lonDegFromMeade} from '../astro/time';
+import {
+  raDeltaDeg, relayDecision, relaySignWasWrong,
+  type RelayRates, type RelaySigns,
+} from '../astro/gotorelay';
+import {DEFAULT_SKY_RATES} from '../astro/tracking';
+import {raDecToAltAz} from '../astro/coords';
 import type {ScopeModelId} from '../../store/settingsStore';
 import {useSettingsStore} from '../../store/settingsStore';
 import {useScopeStore} from '../../store/scopeStore';
+import {useMotorCalibStore, type MotorSpeed} from '../../store/motorCalibStore';
 
 export type Dir = 'n' | 's' | 'e' | 'w';
 export type Speed = keyof typeof SPEED_CMDS;
 
 export interface RaDec {raDeg: number; decDeg: number}
 
-/** Résultat d'un GOTO (v2.0.1) — voir AutostarClient.gotoRaDec. */
-export type GotoStatus = 'ok' | 'belowHorizon' | 'noObject' | 'refused' | 'mute' | 'noLink';
+/** Résultat d'un GOTO (v2.0.1, relais v2.5.0) — voir AutostarClient.gotoRaDec. */
+export type GotoStatus =
+  | 'ok' | 'belowHorizon' | 'noObject' | 'refused' | 'mute' | 'noLink'
+  | 'relayPartial'; // relais : approché mais pas dans la tolérance (butée/stalle)
 
 /** Textes i18n nécessaires pour traduire un statut de GOTO. */
 export interface GotoErrorTexts {
@@ -29,6 +38,7 @@ export interface GotoErrorTexts {
   gotoNoLink: string;
   gotoMute: string;
   refused: string;
+  relayPartial: string;
 }
 
 /** Message localisé pour un statut de GOTO — partagé par tous les écrans
@@ -40,6 +50,7 @@ export function gotoErrorText(r: GotoStatus, x: GotoErrorTexts): string {
     : r === 'noObject' ? x.empty
     : r === 'noLink' ? x.gotoNoLink
     : r === 'mute' ? x.gotoMute
+    : r === 'relayPartial' ? x.relayPartial
     : x.refused;
 }
 
@@ -796,7 +807,7 @@ export class AutostarClient {
    *  l'autre précision AVANT de renoncer : un GO TO ne doit jamais échouer
    *  pour une histoire de format. La fin du slew est suivie par :D#
    *  (barre "|" pendant le moteur, chaîne vide à l'arrivée — spec Autostar). */
-  async gotoRaDec(raDeg: number, decDeg: number): Promise<GotoStatus> {
+  async gotoRaDec(raDeg: number, decDeg: number, horizonNow?: Date): Promise<GotoStatus> {
     this.bump();
     // PHASE CRITIQUE (v2.1.1) : le polling (:ED#/:Gr#/:Gd#) est suspendu
     // pendant toute la séquence — un GOTO lancé depuis l'app doit avoir la
@@ -805,9 +816,223 @@ export class AutostarClient {
     // physique, sans trafic concurrent, passait toujours).
     this.cmdPhase = true;
     try {
-      return await this.gotoRaDecInner(raDeg, decDeg);
+      const r = await this.gotoRaDecInner(raDeg, decDeg);
+      // RELAIS (v2.5.0 — cause racine « GOTO lancé depuis l'app = raquette
+      // déconnectée ») : sur certaines raquettes (DS/Autostar série lente),
+      // :Sr/:Sd/:MS échoue ALORS QUE lectures de position et moteurs
+      // fonctionnent (socle éprouvé des flèches/suivi/réglage fin). Les
+      // réponses honnêtes du protocole (objet sous l'horizon, introuvable)
+      // ne déclenchent PAS de relais ; les échecs de LIAISON (mute, refus
+      // muet, liaison tombée) oui — après rétablissement automatique.
+      if (r === 'ok' || r === 'belowHorizon' || r === 'noObject') return r;
+      return await this.gotoRaDecRelay(raDeg, decDeg, r, horizonNow);
     } finally {
       this.cmdPhase = false;
+    }
+  }
+
+  /** Attend le rétablissement automatique de la liaison (USB/BT v2.1.1+
+   *  v2.1.2) — un brown-out pendant :MS ne doit plus tuer le GOTO : la
+   *  reconnexion automatique tourne déjà, le relais la laisse finir puis
+   *  pointe lui-même. Renvoie true si la liaison revient. */
+  private async waitForLink(maxS: number): Promise<boolean> {
+    for (let i = 0; i < maxS; i++) {
+      if (this.isConnected()) return true;
+      await sleep(1000);
+    }
+    return this.isConnected();
+  }
+
+  /** Taux du relais : taux MESURÉS au calibrage si disponibles pour la
+   *  vitesse demandée, sinon taux théoriques du ciel. */
+  private relayRates(): RelayRates {
+    const mc = useMotorCalibStore.getState();
+    const rateFor = (s: 'slew' | 'center'): number => {
+      const spd: MotorSpeed = s;
+      if (mc.apply && mc.rates && mc.rates.speed === spd) {
+        const raMeas = mc.rates.e ?? mc.rates.w;
+        const decMeas = mc.rates.n ?? mc.rates.s;
+        const m = Math.min(raMeas ?? Infinity, decMeas ?? Infinity);
+        if (Number.isFinite(m) && m > 1e-4) return m;
+      }
+      return DEFAULT_SKY_RATES[spd];
+    };
+    return {slew: rateFor('slew'), center: rateFor('center')};
+  }
+
+  /** Signes du relais : apprentissage persisté du calibrage si actif. */
+  private relaySigns(): RelaySigns {
+    const mc = useMotorCalibStore.getState();
+    return mc.apply ? {ra: mc.signs.ra, dec: mc.signs.dec} : {ra: 1, dec: 1};
+  }
+
+  /**
+   * GOTO RELAIS en boucle fermée (v2.5.0) — pilote les moteurs LUI-MÊME avec
+   * les commandes éprouvées (vitesses :RS#/:RC#, mouvements :Me#:Mw#:Mn#:Ms#,
+   * lectures :Gr#/:Gd#) jusqu'à amener la monture sur la cible. Ne suppose
+   * AUCUNE commande de GOTO côté raquette : c'est le contournement des
+   * raquettes qui restent muettes sur :Sr/:Sd/:MS.
+   *
+   * Garde-fous : horizon (alt < 0 → refus honnête), impulsion plafonnée,
+   * inversion de sens automatique si l'erreur d'un axe augmente, détection
+   * de stalle (butée / moteur sans effet), garde de durée globale,
+   * stopAll systématique en sortie. Notifie onGotoStart/onGotoArrival pour
+   * le contrôle croisé télémétrie/moteurs et le réglage fin (v2.3.0/v2.2.0).
+   */
+  private async gotoRaDecRelay(raDeg: number, decDeg: number, cause: GotoStatus, horizonNow?: Date): Promise<GotoStatus> {
+    const log = (m: string) => useScopeStore.getState().pushLog('info', m);
+    const logErr = (m: string) => useScopeStore.getState().pushLog('error', m);
+    const causeTxt = cause === 'noLink' ? 'liaison perdue' : cause === 'refused' ? 'cible refusée' : 'raquette muette';
+    logErr(`GO TO direct impossible (${causeTxt}) — RELAIS : pilotage moteur en boucle fermée`);
+
+    // 1. liaison : un noLink laisse la reconnexion automatique finir (25 s)
+    if (cause === 'noLink' && !(await this.waitForLink(25))) {
+      logErr('RELAIS abandonné : liaison non rétablie');
+      return 'noLink';
+    }
+
+    // 2. horizon : le relais n'a pas le garde-fou :MS — le calcul d'altitude
+    //    du téléphone le remplace (refus honnête au lieu d'une butée brutale)
+    const site = useSettingsStore.getState().site;
+    const alt = raDecToAltAz(raDeg, decDeg, site.latDeg, site.lonDeg, horizonNow ?? new Date()).altDeg;
+    if (alt < 0) {
+      log(`RELAIS : cible sous l'horizon (alt ${alt.toFixed(0)}°) — refus`);
+      return 'belowHorizon';
+    }
+
+    // 3. position initiale — sans position lisible, rien n'est possible
+    let cur: {raDeg: number | null; decDeg: number | null} | null = null;
+    for (let i = 0; i < 3 && !cur; i++) {
+      cur = await this.readPosition().catch(() => null);
+      if (cur && cur.raDeg === null && cur.decDeg === null) cur = null;
+    }
+    if (!cur || cur.raDeg == null || cur.decDeg == null) {
+      // un seul axe lisible suffit : l'autre partira du dernier connu
+      const raKnown = cur?.raDeg != null;
+      const decKnown = cur?.decDeg != null;
+      if (!raKnown && !decKnown) {
+        logErr('RELAIS abandonné : position de la monture illisible (:Gr#/:Gd# muets)');
+        return 'mute';
+      }
+    }
+    const pos = {
+      raDeg: cur?.raDeg ?? this.lastRaDeg ?? raDeg,
+      decDeg: cur?.decDeg ?? this.lastDecDeg ?? decDeg,
+    };
+
+    // 4. boucle fermée
+    this.ownMoveUntil = Date.now() + 300000; // tout le mouvement = l'app
+    this.notifyGotoStart(); // contrôle croisé armé (v2.3.0)
+    const signs = this.relaySigns();
+    const rates = this.relayRates();
+    const startedAt = Date.now();
+    const MAX_MS = 210000;
+    // reste d'arc d'un axe après impulsion (raccord 0 h pour l'AD)
+    const remainRaOf = (ra: number) => raDeltaDeg(ra, raDeg);
+    const remainDecOf = (dec: number) => dec - decDeg;
+    const stalledStreak = {ra: 0, dec: 0};
+    let lastSpeed: 'slew' | 'center' | null = null;
+    let iterations = 0;
+    try {
+      while (Date.now() - startedAt < MAX_MS && this.isConnected() && iterations < 90) {
+        iterations += 1;
+        const d = relayDecision({
+          raDeg: pos.raDeg, decDeg: pos.decDeg,
+          targetRaDeg: raDeg, targetDecDeg: decDeg,
+          signs, rates, maxPulseS: 6,
+        });
+        if (d.done) {
+          await this.stopAll().catch(() => undefined);
+          log(`RELAIS : cible atteinte en ${(Date.now() - startedAt) / 1000 | 0} s (${iterations} pas) — contrôle croisé en cours`);
+          this.ownMoveUntil = Date.now() + 1200;
+          this.watchSlewEnd(); // suivi de fin + notif d'arrivée (v2.2.0)
+          return 'ok';
+        }
+        if (d.speed !== lastSpeed) {
+          lastSpeed = d.speed;
+          await this.setSpeed(d.speed).catch(() => undefined);
+        }
+        const before = {ra: d.remainRaDeg, dec: d.remainDecDeg};
+        const raMs = Math.round(d.raS * 1000);
+        const decMs = Math.round(d.decS * 1000);
+        const commandedArc = Math.max(d.raS, d.decS) * rates[d.speed];
+        const startedDirs: Dir[] = [];
+        if (d.dirs.raDir) {
+          await this.startMove(d.dirs.raDir).catch(() => undefined);
+          startedDirs.push(d.dirs.raDir);
+        }
+        if (d.dirs.decDir) {
+          await this.startMove(d.dirs.decDir).catch(() => undefined);
+          startedDirs.push(d.dirs.decDir);
+        }
+        // arrêt INDIVIDUEL : chaque axe s'arrête à SA durée (mouvement
+        // parallèle à vitesse commune de la monture)
+        if (raMs <= decMs) {
+          if (raMs > 0) await sleep(raMs);
+          if (d.dirs.raDir) await this.stopMove(d.dirs.raDir).catch(() => undefined);
+          if (decMs - Math.max(raMs, 0) > 0) await sleep(decMs - Math.max(raMs, 0));
+          if (d.dirs.decDir) await this.stopMove(d.dirs.decDir).catch(() => undefined);
+        } else {
+          if (decMs > 0) await sleep(decMs);
+          if (d.dirs.decDir) await this.stopMove(d.dirs.decDir).catch(() => undefined);
+          if (raMs - Math.max(decMs, 0) > 0) await sleep(raMs - Math.max(decMs, 0));
+          if (d.dirs.raDir) await this.stopMove(d.dirs.raDir).catch(() => undefined);
+        }
+        await sleep(350); // inertie mécanique avant relecture
+        const next = await this.readPosition().catch(() => null);
+        if (next) {
+          const newRa = next.raDeg ?? pos.raDeg;
+          const newDec = next.decDeg ?? pos.decDeg;
+          // inversion automatique : l'erreur a grandi après une impulsion franche
+          if (d.dirs.raDir && next.raDeg != null &&
+              relaySignWasWrong(before.ra, remainRaOf(newRa), commandedArc)) {
+            signs.ra = (signs.ra * -1) as 1 | -1;
+            log(`RELAIS : sens AD inversé (${signs.ra > 0 ? 'Est = AD+' : 'Ouest = AD−'}) — convention du matériel apprise`);
+            stalledStreak.ra = 0;
+          }
+          if (d.dirs.decDir && next.decDeg != null &&
+              relaySignWasWrong(before.dec, remainDecOf(newDec), commandedArc)) {
+            signs.dec = (signs.dec * -1) as 1 | -1;
+            log(`RELAIS : sens DEC inversé (${signs.dec > 0 ? 'Nord = DEC+' : 'Sud = DEC−'}) — convention du matériel apprise`);
+            stalledStreak.dec = 0;
+          }
+          // stalle : axes COMMANDÉS figés — butée atteinte ou moteur sans effet
+          if (d.dirs.raDir) {
+            stalledStreak.ra = next.raDeg != null && Math.abs(newRa - pos.raDeg) < 0.02
+              ? stalledStreak.ra + 1 : 0;
+          }
+          if (d.dirs.decDir) {
+            stalledStreak.dec = next.decDeg != null && Math.abs(newDec - pos.decDeg) < 0.02
+              ? stalledStreak.dec + 1 : 0;
+          }
+          const commandedAxes = (d.dirs.raDir ? 1 : 0) + (d.dirs.decDir ? 1 : 0);
+          const stalledAxes =
+            (d.dirs.raDir && stalledStreak.ra >= 3 ? 1 : 0) +
+            (d.dirs.decDir && stalledStreak.dec >= 3 ? 1 : 0);
+          if (commandedAxes > 0 && stalledAxes >= commandedAxes) {
+            await this.stopAll().catch(() => undefined);
+            logErr('RELAIS interrompu : position figée malgré les impulsions (butée atteinte ou monture hors tension)');
+            this.ownMoveUntil = Date.now() + 1200;
+            return 'relayPartial';
+          }
+          pos.raDeg = newRa;
+          pos.decDeg = newDec;
+          useScopeStore.getState().setPosition(pos.raDeg, pos.decDeg); // carte du ciel suit le relais en live
+        }
+      }
+      await this.stopAll().catch(() => undefined);
+      this.ownMoveUntil = Date.now() + 1200;
+      const fin = relayDecision({
+        raDeg: pos.raDeg, decDeg: pos.decDeg, targetRaDeg: raDeg, targetDecDeg: decDeg,
+        signs, rates, maxPulseS: 6,
+      });
+      const remainArc = Math.max(Math.abs(fin.remainRaDeg), Math.abs(fin.remainDecDeg));
+      logErr(`RELAIS : cible approchée à ${(remainArc * 60).toFixed(0)}' mais hors tolérance (${
+        Date.now() - startedAt > MAX_MS ? 'garde de durée' : 'liaison interrompue'})`);
+      return 'relayPartial';
+    } finally {
+      // rien ne doit rester en mouvement, quel que soit le chemin de sortie
+      await this.stopAll().catch(() => undefined);
     }
   }
 

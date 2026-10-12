@@ -11,6 +11,7 @@ import {ErrorBoundary} from '../ErrorBoundary';
 import {MainScreen} from '../screens/MainScreen';
 import {ObjectScreen} from '../screens/ObjectScreen';
 import {SkyScreen} from '../screens/SkyScreen';
+import {CameraScreen} from '../screens/CameraScreen';
 import {AlignScreen} from '../screens/AlignScreen';
 import {SetupScreen} from '../screens/SetupScreen';
 import {ConnectScreen} from '../screens/ConnectScreen';
@@ -57,6 +58,8 @@ function MainTabs() {
         options={{tabBarLabel: t.tabs.objects, tabBarIcon: ({color, focused}) => <TabIcon glyph="✦" focused={focused} color={color} />}} />
       <Tabs.Screen name="Sky" component={guarded('Ciel', SkyScreen)}
         options={{tabBarLabel: t.tabs.sky, tabBarIcon: ({color, focused}) => <TabIcon glyph="☾" focused={focused} color={color} />}} />
+      <Tabs.Screen name="Camera" component={guarded('Caméra', CameraScreen)}
+        options={{tabBarLabel: t.tabs.camera, tabBarIcon: ({color, focused}) => <TabIcon glyph="▣" focused={focused} color={color} />}} />
       <Tabs.Screen name="Align" component={guarded('Alignement', AlignScreen)}
         options={{tabBarLabel: t.tabs.align, tabBarIcon: ({color, focused}) => <TabIcon glyph="◎" focused={focused} color={color} />}} />
       <Tabs.Screen name="Handbox" component={guarded('Raquette', HandboxScreen)}

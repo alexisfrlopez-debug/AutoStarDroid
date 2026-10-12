@@ -23,6 +23,7 @@ jest.mock('@react-native-async-storage/async-storage', () => ({
 
 import {AutostarClient, gotoErrorText} from '../src/services/protocol/client';
 import {useScopeStore} from '../src/store/scopeStore';
+import {useSettingsStore} from '../src/store/settingsStore';
 import type {ConnectOptions, Transport, TransportType} from '../src/services/connection/types';
 import {TransportError} from '../src/services/connection/types';
 
@@ -92,19 +93,26 @@ describe('v2.0.1 — GOTO granulaire (fini le « Connexion refusée » fourre-to
     expect(tp.writes).toContain('\x1b\x1b');
   }, 15000);
 
-  test(':Sr muet même après ESC ESC → \'mute\' (pas de :Sd ni :MS)', async () => {
+  test(':Sr muet même après ESC ESC → relais : position illisible → \'mute\' (pas de :Sd ni :MS)', async () => {
     ({client, tp} = await connectedClient());
     tp.script = [null, null, null]; // muet, muet (ESC ESC), muet (retentative)
+    // relais : site pôle Nord (alt = dec > 0 garanti), position illisible
+    useSettingsStore.getState().setSite({name: 'Pôle', latDeg: 90, lonDeg: 0, elevM: 0});
     const r = await client.gotoRaDec(82.75, 22.0147);
     expect(r).toBe('mute');
     expect(tp.writes.some((w) => w.startsWith(':Sd'))).toBe(false);
     expect(tp.writes.some((w) => w === ':MS#')).toBe(false);
+    // le relais a bien été tenté, mais sans aucune lecture de position : pas
+    // un seul ordre moteur ne part (sécurité)
+    expect(tp.writes.some((w) => w === ':RS#' || w === ':RC#')).toBe(false);
   }, 15000);
 
-  test('refus explicite « 0 » aux 2 précisions → \'refused\' (comportement v1.8.1 conservé)', async () => {
+  test('refus explicite « 0 » aux 2 précisions → \'refused\' sur le chemin DIRECT (v1.8.1 conservé)', async () => {
     ({client, tp} = await connectedClient());
     tp.script = ['0#', '0#'];
-    const r = await client.gotoRaDec(82.75, 22.0147);
+    // v2.5.0 : le CHEMIN DIRECT garde la sémantique de refus (testée ici sur
+    // gotoRaDecInner) ; ensuite gotoRaDec enchaîne sur le relais (tests v2.5.0)
+    const r = await (client as any).gotoRaDecInner(82.75, 22.0147);
     expect(r).toBe('refused');
     expect(tp.writes.some((w) => w === ':MS#')).toBe(false);
   }, 15000);
@@ -118,12 +126,17 @@ describe('v2.0.1 — GOTO granulaire (fini le « Connexion refusée » fourre-to
     expect(tp.writes.some((w) => w === ':D#')).toBe(true);
   }, 15000);
 
-  test(':MS muet → sonde :D# voit la monture à l\'arrêt (vide) → \'mute\'', async () => {
+  test(':MS muet → sonde :D# voit la monture à l\'arrêt (vide) → \'mute\' → relais refuse sous l\'horizon', async () => {
     ({client, tp} = await connectedClient());
     // :Sr ok, :Sd ok, :MS muet, [sonde] :D# → vide (à l'arrêt : :MS sans effet)
     tp.script = ['1#', '1#', null, '#'];
+    // relais : site pôle Nord → alt(DEC −30°) = −30° < 0 : le garde-fou
+    // horizon du relais refuse de piloter les moteurs sous l'horizon
+    useSettingsStore.getState().setSite({name: 'Pôle', latDeg: 90, lonDeg: 0, elevM: 0});
     const r = await client.gotoRaDec(10, -30);
-    expect(r).toBe('mute');
+    expect(r).toBe('belowHorizon');
+    // aucune impulsion moteur : le relais s'est arrêté au garde-fou
+    expect(tp.writes.some((w) => w === ':RS#' || w === ':RC#' || w === ':Me#' || w === ':Mn#')).toBe(false);
   }, 15000);
 
   test('liaison morte (écriture impossible) → \'noLink\' ET connexion remise à zéro', async () => {
@@ -135,7 +148,9 @@ describe('v2.0.1 — GOTO granulaire (fini le « Connexion refusée » fourre-to
     expect(r).toBe('noLink');
     // plus de « connected » fantôme : l'app sait qu'il faut se reconnecter
     expect(useScopeStore.getState().connStatus).toBe('disconnected');
-  }, 15000);
+    // v2.5.0 : le relais a laissé 25 s à la reconnexion automatique avant
+    // d'abandonner (aucun mouvement sans liaison)
+  }, 45000);
 
   test('syncRaDec : muet → ESC ESC + retentative → SYNC acceptée (:CM envoyé)', async () => {
     ({client, tp} = await connectedClient());
@@ -158,6 +173,7 @@ describe('v2.0.1 — GOTO granulaire (fini le « Connexion refusée » fourre-to
     const x = {
       belowHorizon: 'SOUS-HORIZON', empty: 'VIDE',
       gotoNoLink: 'LIISON-MORTE', gotoMute: 'MUETTE', refused: 'REFUS',
+      relayPartial: 'RELAIS-PARTIEL',
     };
     expect(gotoErrorText('ok', x)).toBe('');
     expect(gotoErrorText('belowHorizon', x)).toBe('SOUS-HORIZON');
@@ -165,6 +181,7 @@ describe('v2.0.1 — GOTO granulaire (fini le « Connexion refusée » fourre-to
     expect(gotoErrorText('noLink', x)).toBe('LIISON-MORTE');
     expect(gotoErrorText('mute', x)).toBe('MUETTE');
     expect(gotoErrorText('refused', x)).toBe('REFUS');
+    expect(gotoErrorText('relayPartial', x)).toBe('RELAIS-PARTIEL');
   });
 });
 
@@ -189,7 +206,10 @@ describe('v2.1.1 — GOTO hors raquette : ligne série réservée à la séquenc
     useScopeStore.setState({hbSync: 'live' as const});
     (client as any).setPollInterval(25);
     (client as any).startPoll();
-    tp.script = [null, null, null]; // :Sr muet ×2 → statut 'mute'
+    tp.script = [null, null, null]; // :Sr muet ×2 → statut 'mute' → relais
+    // relais : alt = dec (+20° au pôle Nord) > 0 garanti, position illisible →
+    // abandon immédiat sans moteur
+    useSettingsStore.getState().setSite({name: 'Pôle', latDeg: 90, lonDeg: 0, elevM: 0});
     const p = client.gotoRaDec(10, 20);
     await flush(200);
     expect((client as any).cmdPhase).toBe(true);

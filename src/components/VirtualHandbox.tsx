@@ -222,6 +222,7 @@ export function VirtualHandbox() {
         showMsg(gotoErrorText(r, {
           belowHorizon: t.objects.belowHorizon, empty: t.hb.msgs.noObject,
           gotoNoLink: t.errors.gotoNoLink, gotoMute: t.errors.gotoMute, refused: t.errors.refused,
+          relayPartial: t.errors.relayPartial,
         }), 4000);
       }
     } catch (e) {

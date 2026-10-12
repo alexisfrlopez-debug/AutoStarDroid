@@ -3,6 +3,7 @@ import {createJSONStorage, persist} from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type {MountPresetId} from '../services/astro/mounts';
 import type {PhoneAngle, PhonePose, PhonePosition} from '../services/astro/phonemount';
+import type {GuidingAxes} from '../services/astro/guiding';
 
 export type Lang = 'en' | 'fr';
 export type ScopeModelId = 'autostar2' | 'autostar497' | 'autostar495' | 'autostar494' | 'lx200';
@@ -47,6 +48,10 @@ interface SettingsState {
   skyMountPose: PhonePose;
   skyMountAngle: PhoneAngle;
   skyMountPosition: PhonePosition;
+  /** AUTOGUIDAGE IMAGE (v2.5.0) : table d'axes image→moteurs + échelle
+   *  ″/px apprise au calibrage — persistés pour ne pas recalibrer chaque nuit. */
+  guideAxes: GuidingAxes;
+  guideScaleArcsecPerPx: number;
   setLanguage: (l: Lang) => void;
   setNightVision: (v: boolean) => void;
   setKeySounds: (v: boolean) => void;
@@ -64,6 +69,8 @@ interface SettingsState {
   setSkyMountPose: (p: PhonePose) => void;
   setSkyMountAngle: (a: PhoneAngle) => void;
   setSkyMountPosition: (p: PhonePosition) => void;
+  setGuideAxes: (a: GuidingAxes) => void;
+  setGuideScale: (s: number) => void;
 }
 
 export const useSettingsStore = create<SettingsState>()(
@@ -86,6 +93,8 @@ export const useSettingsStore = create<SettingsState>()(
       skyMountPose: 'portrait',
       skyMountAngle: 0,
       skyMountPosition: 'top',
+      guideAxes: {xAxis: 'ra', flipX: false, flipY: false},
+      guideScaleArcsecPerPx: 2,
       setLanguage: (language) => set({language}),
       setNightVision: (nightVision) => set({nightVision}),
       setKeySounds: (keySounds) => set({keySounds}),
@@ -103,6 +112,8 @@ export const useSettingsStore = create<SettingsState>()(
       setSkyMountPose: (skyMountPose) => set({skyMountPose}),
       setSkyMountAngle: (skyMountAngle) => set({skyMountAngle}),
       setSkyMountPosition: (skyMountPosition) => set({skyMountPosition}),
+      setGuideAxes: (guideAxes) => set({guideAxes}),
+      setGuideScale: (guideScaleArcsecPerPx) => set({guideScaleArcsecPerPx}),
     }),
     {
       name: 'autostardroid-settings',
