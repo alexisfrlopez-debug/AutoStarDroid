@@ -2,6 +2,7 @@ import {create} from 'zustand';
 import {createJSONStorage, persist} from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type {MountPresetId} from '../services/astro/mounts';
+import type {PhoneAngle, PhonePose, PhonePosition} from '../services/astro/phonemount';
 
 export type Lang = 'en' | 'fr';
 export type ScopeModelId = 'autostar2' | 'autostar497' | 'autostar495' | 'autostar494' | 'lx200';
@@ -40,6 +41,12 @@ interface SettingsState {
    *  par la télémétrie du téléphone, puis la validation utilisateur et
    *  l'enregistrement des nouveaux paramètres. */
   telemetryPrecision: boolean;
+  /** MONTAGE DU TÉLÉPHONE SUR LE TUBE (v2.4.0) : convertit l'orientation
+   *  des capteurs en direction de visée du télescope pour la carte du ciel
+   *  (pose, angle au tube 0/45/90°, position dessus/gauche/droite). */
+  skyMountPose: PhonePose;
+  skyMountAngle: PhoneAngle;
+  skyMountPosition: PhonePosition;
   setLanguage: (l: Lang) => void;
   setNightVision: (v: boolean) => void;
   setKeySounds: (v: boolean) => void;
@@ -54,6 +61,9 @@ interface SettingsState {
   setAutoSyncScope: (v: boolean) => void;
   setMountPreset: (p: MountPresetId | 'auto') => void;
   setTelemetryPrecision: (v: boolean) => void;
+  setSkyMountPose: (p: PhonePose) => void;
+  setSkyMountAngle: (a: PhoneAngle) => void;
+  setSkyMountPosition: (p: PhonePosition) => void;
 }
 
 export const useSettingsStore = create<SettingsState>()(
@@ -73,6 +83,9 @@ export const useSettingsStore = create<SettingsState>()(
       autoSyncScope: true,
       mountPreset: 'auto',
       telemetryPrecision: true,
+      skyMountPose: 'portrait',
+      skyMountAngle: 0,
+      skyMountPosition: 'top',
       setLanguage: (language) => set({language}),
       setNightVision: (nightVision) => set({nightVision}),
       setKeySounds: (keySounds) => set({keySounds}),
@@ -87,6 +100,9 @@ export const useSettingsStore = create<SettingsState>()(
       setAutoSyncScope: (autoSyncScope) => set({autoSyncScope}),
       setMountPreset: (mountPreset) => set({mountPreset}),
       setTelemetryPrecision: (telemetryPrecision) => set({telemetryPrecision}),
+      setSkyMountPose: (skyMountPose) => set({skyMountPose}),
+      setSkyMountAngle: (skyMountAngle) => set({skyMountAngle}),
+      setSkyMountPosition: (skyMountPosition) => set({skyMountPosition}),
     }),
     {
       name: 'autostardroid-settings',

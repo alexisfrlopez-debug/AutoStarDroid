@@ -102,6 +102,84 @@ export function fovCircleRadiusPx(circleFovDeg: number, g: ViewGeometry): number
 }
 
 /**
+ * Disposition des ÉTIQUETTES HORIZONTALES des objets (v2.4.0 — « je veux
+ * les noms des objets horizontaux, et qu'ils soient cliquables »).
+ *
+ * RÈGLES :
+ *  - le texte reste TOUJOURS horizontal (indépendant de la projection) ;
+ *  - priorité aux objets les PLUS BRILLANTS : le tableau reçu doit être
+ *    trié du plus prioritaire au moins prioritaire (la carte du ciel passe
+ *    une copie « brillants d'abord ») — une étiquette qui chevauche une
+ *    étiquette déjà posée est RETIRÉE (pas de cumul illisible) ;
+ *  - l'étiquette se place à droite du point, sinon à gauche si elle
+ *    débordait du cadre, bornée verticalement ;
+ *  - le rectangle renvoyé sert aussi de ZONE CLIQUABLE (tap sur le nom).
+ *
+ * Largeur estimée : police système ~0,62 · fontSize par caractère.
+ * 100 % pur — testable sous Jest.
+ */
+
+export interface LabelLayout {
+  show: boolean;
+  /** Coin gauche du texte (px). */
+  x: number;
+  /** Haut du texte (px). */
+  y: number;
+  /** Largeur estimée du texte (px). */
+  w: number;
+  /** Hauteur du texte (px). */
+  h: number;
+}
+
+export function labelWidthPx(name: string, fontSize = 9): number {
+  return Math.round(name.length * fontSize * 0.62) + 4;
+}
+
+export function layoutLabels<T extends ViewItem & {id: string}>(
+  placed: Array<PlacedItem<T>>,
+  opts: {
+    width: number;
+    height: number;
+    dotSize: (item: T) => number;
+    labelFor: (item: T, p: PlacedItem<T>) => string | null;
+    fontSize?: number;
+  },
+): Map<T, LabelLayout> {
+  const fs = opts.fontSize ?? 9;
+  const h = Math.round(fs * 1.25);
+  const out = new Map<T, LabelLayout>();
+  const taken: Array<{x: number; y: number; w: number; h: number}> = [];
+  for (const p of placed) {
+    const name = opts.labelFor(p.item, p);
+    if (!name) {
+      out.set(p.item, {show: false, x: 0, y: 0, w: 0, h});
+      continue;
+    }
+    const w = labelWidthPx(name, fs);
+    const dot = opts.dotSize(p.item);
+    let x = p.x + dot / 2 + 3;
+    if (x + w > opts.width - 2) x = p.x - dot / 2 - 3 - w; // miroir si débordement
+    let y = p.y - h / 2;
+    // Bornes : reste dans le cadre, sans cacher le bord.
+    if (x < 2) x = Math.min(opts.width - w - 2, p.x + dot / 2 + 3);
+    if (x < 2) x = 2;
+    y = Math.max(2, Math.min(opts.height - h - 2, y));
+    // Anti-chevauchement : rectangles légèrement aérés.
+    const r = {x: x - 3, y: y - 2, w: w + 6, h: h + 4};
+    const hit = taken.some(
+      (q) => r.x < q.x + q.w && r.x + r.w > q.x && r.y < q.y + q.h && r.y + r.h > q.y,
+    );
+    if (hit) {
+      out.set(p.item, {show: false, x, y, w, h});
+      continue;
+    }
+    taken.push(r);
+    out.set(p.item, {show: true, x, y, w, h});
+  }
+  return out;
+}
+
+/**
  * Déplacement du CENTRE après un glissement de doigt (deg) : l'utilisateur
  * panne la carte à la main quand aucune position télémétrique n'est
  * disponible. Le facteur suit la projection (fov / pixels).

@@ -32,7 +32,7 @@ import {SkyScreen} from '../src/screens/SkyScreen';
 
 const flush = (ms = 50) => new Promise((r) => setTimeout(r, ms));
 
-describe('Carte du ciel (v2.3.0)', () => {
+describe('Carte du ciel (v2.3.0 + montage téléphone v2.4.0)', () => {
   it('se monte hors connexion : champs, réticule et hint présents, aucune exception', async () => {
     const uncaught: string[] = [];
     const tree = await createRTR(<SkyScreen />, {
@@ -46,6 +46,9 @@ describe('Carte du ciel (v2.3.0)', () => {
     expect(all).toContain('45°');
     expect(all).toContain('Miroir chercheur (image inversée)');
     expect(all).toContain('Touchez un objet pour le sélectionner');
+    // v2.4.0 : carte MONTAGE DU TÉLÉPHONE (repliée par défaut = résumé visible)
+    expect(all).toContain('Téléphone sur le tube');
+    expect(all).toContain('Portrait · Aligné au tube · Dessus');
     // des objets projetés sont rendus (étoiles brillantes du catalogue)
     const dots = tree.root.findAllByType(View).filter((n: any) =>
       n.props.style && Array.isArray(n.props.style) === false && n.props.style.borderRadius != null);
