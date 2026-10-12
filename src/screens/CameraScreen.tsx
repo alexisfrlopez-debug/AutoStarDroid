@@ -23,7 +23,7 @@ import {useT} from '../i18n';
 import {useSettingsStore} from '../store/settingsStore';
 import {useCameraStore} from '../store/cameraStore';
 import {useScopeStore} from '../store/scopeStore';
-import {astroCamera, type CameraFrame} from '../services/phone/astroCamera';
+import {astroCamera} from '../services/phone/astroCamera';
 import {
   acquisitionRunner, buildPlan,
   type AcqKind, type AcqQuality, type AcqProgress,
@@ -36,19 +36,18 @@ import {Btn, Card, Segmented, Toggle, Title, usePal, s} from '../components/ui';
 
 /** Aperçu : consomme le flux à part (throttle 150 ms) pour ne pas
  *  relancer tout l'écran à chaque frame. */
-function Preview({onFrame}: {onFrame?: (f: CameraFrame) => void}) {
+function Preview() {
   const c = usePal();
   const [uri, setUri] = useState<string | null>(null);
   const lastTs = useRef(0);
   useEffect(() => {
     const rel = astroCamera.onFrame((f) => {
-      onFrame?.(f);
       if (f.ts - lastTs.current < 150) return;
       lastTs.current = f.ts;
       setUri(`data:image/jpeg;base64,${f.data}`);
     });
     return rel;
-  }, [onFrame]);
+  }, []);
   return (
     <View style={{
       borderRadius: 12, overflow: 'hidden', borderWidth: 1, borderColor: c.border,
@@ -81,7 +80,6 @@ export function CameraScreen() {
   const [kind, setKind] = useState<AcqKind>('moon');
   const [quality, setQuality] = useState<AcqQuality>('standard');
   const [expoComp, setExpoComp] = useState(0);
-  const frameCb = useRef<((f: CameraFrame) => void) | null>(null);
 
   const plan = buildPlan(kind, quality, cam.devices.find((d) => d.id === cam.cameraId));
 
@@ -98,7 +96,6 @@ export function CameraScreen() {
         n = 0; window0 = Date.now();
       }
       st.setLastFrame({data: '', w: f.w, h: f.h, ts: f.ts, cx: f.cx, cy: f.cy, peak: f.peak, flux: f.flux});
-      frameCb.current?.(f);
     });
     return rel;
   }, []);
@@ -344,7 +341,9 @@ export function CameraScreen() {
               {cam.acq.state === 'running' ? `${t.cam.running} ${cam.acq.done}/${cam.acq.total}`
                 : cam.acq.state === 'stacking' ? t.cam.stacking
                 : cam.acq.state === 'done' ? t.cam.done
-                : `${t.cam.error} ${cam.acq.note ?? ''}`}
+                : `${t.cam.error} ${cam.acq.note
+                  ? ((t.cam as unknown as Record<string, string>)[cam.acq.note] ?? cam.acq.note)
+                  : ''}`}
             </Text>
           </View>
         ) : null}

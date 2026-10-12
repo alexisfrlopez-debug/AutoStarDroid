@@ -1,8 +1,8 @@
 /** Conversion de coordonnées célestes. */
 import {hourAngleDeg, lstDeg} from './time';
+import {D2R, R2D} from './telemetry';
 
-const D2R = Math.PI / 180;
-const R2D = 180 / Math.PI;
+
 
 /**
  * RA/DEC (deg, date, site) -> hauteur/azimut (deg).

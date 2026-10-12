@@ -44,7 +44,9 @@ export function MountCard() {
   const connStatus = useScopeStore((st) => st.connStatus);
   const fwProduct = useScopeStore((st) => st.fwProduct);
   const fwModel = useScopeStore((st) => st.fwModel);
+  const driverId = useScopeStore((st) => st.driverId);
   const [busy, setBusy] = useState(false);
+  const isMeade = (driverId ?? 'meade') === 'meade';
 
   const active = resolvePreset(mountPreset, fwModel);
   const suggested = suggestPresetForModel(fwModel);
@@ -83,7 +85,7 @@ export function MountCard() {
       <Title text={mx.title} />
       <View style={[s.row, s.between, {marginTop: 4}]}>
         <Text style={{color: c.textDim, fontSize: 13, flex: 1, lineHeight: 19}}>{mx.intro}</Text>
-        {connStatus === 'connected' ? (
+        {connStatus === 'connected' && isMeade ? (
           <TouchableOpacity onPress={detect} disabled={busy}>
             <Text style={{color: c.blue, fontSize: 12, fontWeight: '700', marginLeft: 8}}>
               {busy ? '…' : mx.detect}
@@ -91,7 +93,13 @@ export function MountCard() {
           </TouchableOpacity>
         ) : null}
       </View>
-      <Text style={{color: c.textFaint, fontSize: 11, marginTop: 5, lineHeight: 16}}>{mx.notExposed}</Text>
+      {connStatus === 'connected' && !isMeade ? (
+        <Text style={{color: c.blue, fontSize: 11, marginTop: 5, fontWeight: '700'}}>
+          {autostar.drv.label} — {autostar.drv.brands}
+        </Text>
+      ) : (
+        <Text style={{color: c.textFaint, fontSize: 11, marginTop: 5, lineHeight: 16}}>{mx.notExposed}</Text>
+      )}
 
       <View style={[s.row, {marginTop: 8, flexWrap: 'wrap'}]}>
         {PRESET_ORDER.map((k) =>

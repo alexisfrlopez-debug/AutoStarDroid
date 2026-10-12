@@ -4,6 +4,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import type {MountPresetId} from '../services/astro/mounts';
 import type {PhoneAngle, PhonePose, PhonePosition} from '../services/astro/phonemount';
 import type {GuidingAxes} from '../services/astro/guiding';
+import type {DriverPref} from '../services/protocol/driver';
 
 export type Lang = 'en' | 'fr';
 export type ScopeModelId = 'autostar2' | 'autostar497' | 'autostar495' | 'autostar494' | 'lx200';
@@ -52,6 +53,9 @@ interface SettingsState {
    *  ″/px apprise au calibrage — persistés pour ne pas recalibrer chaque nuit. */
   guideAxes: GuidingAxes;
   guideScaleArcsecPerPx: number;
+  /** PROTOCOLE (v2.6.0) : 'auto' = sondes de détection à la connexion,
+   *  sinon la marque imposée (Meade, Celestron NexStar, SynScan, iOptron). */
+  prefDriver: DriverPref;
   setLanguage: (l: Lang) => void;
   setNightVision: (v: boolean) => void;
   setKeySounds: (v: boolean) => void;
@@ -71,6 +75,7 @@ interface SettingsState {
   setSkyMountPosition: (p: PhonePosition) => void;
   setGuideAxes: (a: GuidingAxes) => void;
   setGuideScale: (s: number) => void;
+  setPrefDriver: (d: DriverPref) => void;
 }
 
 export const useSettingsStore = create<SettingsState>()(
@@ -95,6 +100,7 @@ export const useSettingsStore = create<SettingsState>()(
       skyMountPosition: 'top',
       guideAxes: {xAxis: 'ra', flipX: false, flipY: false},
       guideScaleArcsecPerPx: 2,
+      prefDriver: 'auto',
       setLanguage: (language) => set({language}),
       setNightVision: (nightVision) => set({nightVision}),
       setKeySounds: (keySounds) => set({keySounds}),
@@ -114,6 +120,7 @@ export const useSettingsStore = create<SettingsState>()(
       setSkyMountPosition: (skyMountPosition) => set({skyMountPosition}),
       setGuideAxes: (guideAxes) => set({guideAxes}),
       setGuideScale: (guideScaleArcsecPerPx) => set({guideScaleArcsecPerPx}),
+      setPrefDriver: (prefDriver) => set({prefDriver}),
     }),
     {
       name: 'autostardroid-settings',

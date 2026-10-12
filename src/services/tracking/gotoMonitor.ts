@@ -22,8 +22,8 @@ import {useGotoCheckStore} from '../../store/gotoCheckStore';
 import {useTrackingStore} from '../../store/trackingStore';
 import {useScopeStore} from '../../store/scopeStore';
 import {crossCheck, gyroPathDeg, telePathDeg, type TeleSample, type GyroLite} from '../astro/gotocheck';
+import {sleep} from '../util';
 
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 const TELE_INTERVAL_MS = 200; // 5 Hz : suffisant pour la fluidité, léger
 const GYRO_INTERVAL_MS = 60;

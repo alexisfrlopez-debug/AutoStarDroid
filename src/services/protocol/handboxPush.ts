@@ -23,6 +23,7 @@
 import {autostar} from './client';
 import {HB_KEYS} from './client';
 import {useScopeStore} from '../../store/scopeStore';
+import {sleep} from '../util';
 
 export interface HandboxPushReport {
   clock: 'ok' | 'fail';
@@ -94,7 +95,6 @@ async function readLcd(): Promise<LcdScreen | null> {
   return parseLcdWithSelection(raw);
 }
 
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /** Appui d'une touche SUR la raquette (émulation :EK#). */
 const key = (code: number) => autostar.keyPress(code);

@@ -18,6 +18,8 @@
  * 100 % pur TypeScript — testable sous Jest sans RN.
  */
 
+import {R2D} from './telemetry';
+
 export interface GyroSample {
   /** Horodatage (ms epoch). */
   t: number;
@@ -33,7 +35,6 @@ export interface VecRate {
   z: number;
 }
 
-const R2D = 180 / Math.PI;
 
 function median(xs: number[]): number {
   if (!xs.length) return 0;
@@ -162,9 +163,4 @@ export function trackDriftDegPerSec(
 export function driftVsSiderealArcsecPerSec(driftDegPerSec: number): number {
   const SIDEREAL_ARCSEC_PER_SEC = 15.041;
   return (driftDegPerSec * 3600) - SIDEREAL_ARCSEC_PER_SEC;
-}
-
-/** Conversion backlash : secondes → secondes d'arc au taux donné. */
-export function backlashArcsec(backlashSec: number, rateArcsecPerSec: number): number {
-  return backlashSec * rateArcsecPerSec;
 }

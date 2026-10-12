@@ -4,9 +4,9 @@
  * centrer une planète dans l'oculaire via GOTO.
  */
 import {raDecToAltAz} from './coords';
+import {D2R, R2D} from './telemetry';
 
-const D2R = Math.PI / 180;
-const R2D = 180 / Math.PI;
+
 
 export const PLANET_NAMES = ['Mercury', 'Venus', 'Mars', 'Jupiter', 'Saturn', 'Uranus', 'Neptune'] as const;
 export type PlanetName = typeof PLANET_NAMES[number] | 'Sun' | 'Moon';

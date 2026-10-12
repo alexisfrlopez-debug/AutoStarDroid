@@ -49,6 +49,11 @@ export function AlignScreen() {
       Alert.alert(t.common.error, t.objects.empty);
       return;
     }
+    if (mode === 'easy' && !autostar.drv.caps.alignWizards) {
+      // v2.6.0 : l'assistant « Easy » est un menu interne des raquettes Meade
+      Alert.alert(t.common.error, t.align.noWizard);
+      return;
+    }
     if (mode === 'easy') {
       setBusy(true);
       try {

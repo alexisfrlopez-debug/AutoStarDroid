@@ -1,10 +1,11 @@
-/** Écran Connexion : modèle + 4 liaisons (Wi-Fi/BT/USB/Démo) + détection du firmware. */
+/** Écran Connexion : protocole + modèle + 4 liaisons (Wi-Fi/BT/USB/Démo) + détection du firmware. */
 import {useEffect, useState} from 'react';
 import {Platform, PermissionsAndroid, ScrollView, View, Text, TouchableOpacity} from 'react-native';
 import {useT} from '../i18n';
 import {useSettingsStore, ScopeModelId} from '../store/settingsStore';
 import {useScopeStore} from '../store/scopeStore';
 import {autostar} from '../services/protocol/client';
+import type {DriverPref} from '../services/protocol/driver';
 import {UsbSerialNative, UsbDeviceInfo, BluetoothSppNative} from '../services/connection';
 import {PROFILES} from '../services/protocol/profiles';
 import {FW_SHORT} from '../services/protocol/keymaps';
@@ -37,6 +38,9 @@ export function ConnectScreen() {
   const c = usePal();
   const model = useSettingsStore((s) => s.model);
   const setModel = useSettingsStore((s) => s.setModel);
+  const prefDriver = useSettingsStore((s) => s.prefDriver);
+  const setPrefDriver = useSettingsStore((s) => s.setPrefDriver);
+  const driverId = useScopeStore((s) => s.driverId);
   const lastWifi = useSettingsStore((s) => s.lastWifi);
   const setLastWifi = useSettingsStore((s) => s.setLastWifi);
   const lastBt = useSettingsStore((s) => s.lastBtAddress);
@@ -106,7 +110,7 @@ export function ConnectScreen() {
         tab === 'bluetooth' ? {bluetooth: {address: lastBt}} :
         tab === 'usb' ? {usb: {deviceName: lastUsb, baud: 9600}} :
         {demo: {}};
-      await autostar.connect(tab, opts, model);
+      await autostar.connect(tab, opts, model, prefDriver);
       if (tab === 'wifi') setLastWifi({host: host.trim(), port: parseInt(port, 10) || 4030});
       // firmware : lu en arrière-plan par autostar.detectFirmware() → store
     } catch (e) {
@@ -123,11 +127,53 @@ export function ConnectScreen() {
   };
 
   const modelKeys: ScopeModelId[] = ['autostar2', 'autostar497', 'autostar495', 'autostar494', 'lx200'];
+  const driverOpts: Array<{id: DriverPref; label: string}> = [
+    {id: 'auto', label: t.connect.driverAuto},
+    {id: 'meade', label: t.connect.driverMeade},
+    {id: 'celestron', label: t.connect.driverCelestron},
+    {id: 'skywatcher', label: t.connect.driverSkywatcher},
+    {id: 'ioptron', label: t.connect.driverIoptron},
+  ];
 
   return (
     <ScrollView style={{flex: 1, backgroundColor: c.bg}} contentContainerStyle={{padding: 12, paddingBottom: 40}}>
       <StatusHeader />
       <Card style={{marginTop: 8}}>
+        <Title text={t.connect.driver} />
+        <Text style={{color: c.textFaint, fontSize: 11, marginBottom: 6, lineHeight: 15}}>
+          {t.connect.driverHint}
+        </Text>
+        {driverOpts.map((o) => {
+          const on = prefDriver === o.id;
+          const detected = o.id !== 'auto' && driverId === o.id;
+          return (
+            <TouchableOpacity key={o.id} onPress={() => setPrefDriver(o.id)}
+              style={{flexDirection: 'row', alignItems: 'center', paddingVertical: 8}}>
+              <View style={{
+                width: 18, height: 18, borderRadius: 9, borderWidth: 2,
+                borderColor: on ? c.amber : c.textFaint,
+                alignItems: 'center', justifyContent: 'center', marginRight: 10,
+              }}>
+                {on ? <View style={{width: 8, height: 8, borderRadius: 4, backgroundColor: c.amber}} /> : null}
+              </View>
+              <Text style={{color: c.text, fontSize: 15, fontWeight: '600'}}>{o.label}</Text>
+              {detected ? (
+                <View style={{
+                  marginLeft: 8, borderRadius: 6, borderWidth: 1,
+                  backgroundColor: 'rgba(63,214,140,0.12)', borderColor: 'rgba(63,214,140,0.5)',
+                  paddingHorizontal: 6, paddingVertical: 1,
+                }}>
+                  <Text style={{color: c.green, fontSize: 9, fontWeight: '800', letterSpacing: 0.6}}>
+                    {t.connect.fwAutoBadge}
+                  </Text>
+                </View>
+              ) : null}
+            </TouchableOpacity>
+          );
+        })}
+      </Card>
+
+      <Card style={{marginTop: 12}}>
         <Title text={t.connect.model} />
         <Text style={{color: c.textFaint, fontSize: 11, marginBottom: 6, lineHeight: 15}}>
           {t.connect.modelHint}
@@ -261,6 +307,11 @@ export function ConnectScreen() {
       {connected ? (
         <Card style={{marginTop: 12}}>
           <Title text={t.connect.fwTitle} />
+          {driverId ? (
+            <Text style={{color: c.blue, fontSize: 12, fontWeight: '700', marginBottom: 6}}>
+              {t.connect.proto} : {autostar.drv.label}
+            </Text>
+          ) : null}
           {fwProduct ? (
             <View>
               <Text style={{color: c.text, fontSize: 15, fontWeight: '700', fontFamily: 'monospace'}}>

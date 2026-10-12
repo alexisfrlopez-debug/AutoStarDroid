@@ -35,8 +35,8 @@ import {planetRaDec, type PlanetName} from '../astro/planets';
 import {startOrientation} from '../phone/sensors';
 import {telemetryTracker} from './tracker';
 import {lastGotoVerdict} from '../../store/gotoCheckStore';
+import {sleep} from '../util';
 
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /** Sous ce résidu (min d'arc), pas de correction ni de demande de validation. */
 const FINE_THRESHOLD_ARCMIN = 2;

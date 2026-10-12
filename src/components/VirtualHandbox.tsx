@@ -51,7 +51,8 @@ import {useEffect, useMemo, useRef, useState} from 'react';
 import {Pressable, Text, View, Vibration} from 'react-native';
 import {useT} from '../i18n';
 import {useSettingsStore} from '../store/settingsStore';
-import {autostar, gotoErrorText, type Dir, HB_KEYS, hbDigitKey, LCD_STALE_MS} from '../services/protocol/client';
+import {autostar, gotoErrorText, HB_KEYS, hbDigitKey, LCD_STALE_MS} from '../services/protocol/client';
+import type {Dir, Speed} from '../services/protocol/driver';
 import {handboxSync} from '../services/protocol/handboxSync';
 import {tts} from '../services/phone/tts';
 import {useScopeStore, type HbHint} from '../store/scopeStore';
@@ -66,7 +67,6 @@ import {
 import {type DisplayObject} from '../services/catalog';
 import {raDegToHMS, decDegToDMS} from '../services/astro/time';
 
-type Speed = 'guide' | 'center' | 'find' | 'slew';
 
 /** Retour automatique à l'écran miroir après ce délai sans touche (menus). */
 const MIRROR_RETURN_MS = 5000;
@@ -127,6 +127,10 @@ export function VirtualHandbox() {
   /** Panneau ASU : arbre des menus dépliable + vitesse du focaliseur. */
   const [treeOpen, setTreeOpen] = useState(false);
   const [focusSpeed, setFocusSpeed] = useState<'slow' | 'medium' | 'fast'>('medium');
+  /** Capacités du protocole actif (v2.6.0) : les panneaux Meade (menus,
+   *  miroir LCD, focus, réticule) disparaissent sur NexStar/SynScan/iOptron. */
+  const caps = autostar.drv.caps;
+  const isMeade = autostar.drv.id === 'meade';
   /** Aperçu temporaire des menus locaux quand la synchro est LIVE : sans
    *  touche pendant 5 s, l'écran miroir (AD/DEC de la raquette physique)
    *  reprend la main, pour que les 2 affichages restent identiques. */
@@ -586,8 +590,16 @@ export function VirtualHandbox() {
     // « Select Item » ressemblant à celui de la raquette (sans l'être)
     // portait à confusion ; le vrai écran de la raquette reviendra seul dès
     // que la synchro live fournira un dump :ED# frais.
-    line1 = t.hb.sync.mirrorOff1;
-    line2 = connected ? t.hb.sync.mirrorOff2Sync : t.hb.sync.mirrorOff2Offline;
+    if (connected && !isMeade) {
+      // Protocole sans :ED# (NexStar, SynScan, iOptron) : le miroir du LCD
+      // physique n'existe pas — la raquette virtuelle reste un panneau de
+      // COMMANDE DIRECTE (flèches, vitesses, GOTO, SYNC).
+      line1 = t.hb.sync.direct1;
+      line2 = t.hb.sync.direct2;
+    } else {
+      line1 = t.hb.sync.mirrorOff1;
+      line2 = connected ? t.hb.sync.mirrorOff2Sync : t.hb.sync.mirrorOff2Offline;
+    }
   }
 
   /* ---------- AD/DEC PERMANENT (LCD de droite, v1.8.2) ---------- */
@@ -722,6 +734,9 @@ export function VirtualHandbox() {
       case 'digit': return <NumKey key={key} digit={k.digit} sub={k.sub} />;
       case 'act': {
         const label = keyLabel(k);
+        // v2.6.0 : touches Meade-only masquées sur les autres protocoles
+        if ((k.act === 'focusIn' || k.act === 'focusOut') && !caps.focus) return null;
+        if ((k.act === 'reticlePlus' || k.act === 'reticleMinus') && !caps.reticle) return null;
         if (k.act === 'focusIn') return <HoldKey key={key} label={label} inward />;
         if (k.act === 'focusOut') return <HoldKey key={key} label={label} inward={false} />;
         return (
@@ -933,7 +948,8 @@ export function VirtualHandbox() {
       {/* ——— PANNEAUX « HAND CONTROL » — déplacés en bas de page (v1.8.2) ——— */}
       <View style={{height: 1, backgroundColor: c.border, marginTop: 14, marginBottom: 2}} />
 
-      {/* Panneau ASU : AutoStar Menu (arbre cliquable) */}
+      {/* Panneau ASU : AutoStar Menu (arbre cliquable) — Meade seulement (v2.6.0) */}
+      {isMeade ? (<>
       <Pressable
         onPress={safe(() => {feedback(); setTreeOpen(!treeOpen);})}
         style={({pressed}) => ({
@@ -957,6 +973,7 @@ export function VirtualHandbox() {
           <MenuTree root={root} cursor={cursor} onSelect={treeSelect} />
         </View>
       ) : null}
+      </>) : null}
 
       {/* Panneau ASU : Slew Rate */}
       <Text style={{color: c.textDim, fontSize: 11, fontWeight: '800', letterSpacing: 1, marginTop: 12, marginBottom: 5}}>
@@ -973,29 +990,31 @@ export function VirtualHandbox() {
         onChange={(v) => safe(() => applySpeed(v))()}
       />
 
-      {/* Panneau ASU : Focus In/Out (maintien) + Focus Speed */}
-      <Text style={{color: c.textDim, fontSize: 11, fontWeight: '800', letterSpacing: 1, marginTop: 12, marginBottom: 5}}>
-        {t.hb.focusPanel.toUpperCase()}
-      </Text>
-      <View style={{flexDirection: 'row'}}>
-        <HoldKey label={t.hb.menus.focusIn} inward={true} />
-        <HoldKey label={t.hb.menus.focusOut} inward={false} />
-      </View>
-      <View style={{marginTop: 6}}>
-        <Segmented<'slow' | 'medium' | 'fast'>
-          options={[
-            {key: 'slow', label: t.hb.fsSlow},
-            {key: 'medium', label: t.hb.fsMedium},
-            {key: 'fast', label: t.hb.fsFast},
-          ]}
-          value={focusSpeed}
-          onChange={(v) => safe(() => {
-            feedback();
-            setFocusSpeed(v);
-            if (connected) autostar.setFocusSpeed(v).catch(() => undefined);
-          })()}
-        />
-      </View>
+      {/* Panneau ASU : Focus In/Out (maintien) + Focus Speed — Meade (v2.6.0) */}
+      {caps.focus ? (<>
+        <Text style={{color: c.textDim, fontSize: 11, fontWeight: '800', letterSpacing: 1, marginTop: 12, marginBottom: 5}}>
+          {t.hb.focusPanel.toUpperCase()}
+        </Text>
+        <View style={{flexDirection: 'row'}}>
+          <HoldKey label={t.hb.menus.focusIn} inward={true} />
+          <HoldKey label={t.hb.menus.focusOut} inward={false} />
+        </View>
+        <View style={{marginTop: 6}}>
+          <Segmented<'slow' | 'medium' | 'fast'>
+            options={[
+              {key: 'slow', label: t.hb.fsSlow},
+              {key: 'medium', label: t.hb.fsMedium},
+              {key: 'fast', label: t.hb.fsFast},
+            ]}
+            value={focusSpeed}
+            onChange={(v) => safe(() => {
+              feedback();
+              setFocusSpeed(v);
+              if (connected) autostar.setFocusSpeed(v).catch(() => undefined);
+            })()}
+          />
+        </View>
+      </>) : null}
     </View>
   );
 }

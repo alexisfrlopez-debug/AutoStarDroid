@@ -98,7 +98,7 @@ export function MainScreen({navigation}: {navigation: {navigate: (s: string) => 
           variant="primary" style={{flex: 1, marginRight: 6}} />
         <Btn label={t.main.syncPhone} onPress={syncPhone} disabled={!connected} style={{flex: 1, marginLeft: 6}} />
       </View>
-      <Btn label={t.main.park} onPress={() => autostar.park().catch(() => {})} disabled={!connected}
+      <Btn label={t.main.park} onPress={() => autostar.park().catch(() => {})} disabled={!connected || !autostar.drv.caps.park}
         variant="ghost" style={{marginTop: 10}} />
       <View style={{flexDirection: 'row', marginTop: 10}}>
         <Btn label={t.tabs.handbox} onPress={() => navigation.navigate('Handbox')} style={{flex: 1, marginRight: 6}} />

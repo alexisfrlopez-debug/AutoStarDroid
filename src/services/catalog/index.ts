@@ -7,8 +7,6 @@ import {planetsWithAlt, PlanetName} from '../astro/planets';
 import {raDecToAltAz} from '../astro/coords';
 import type {Dict} from '../../i18n/en';
 
-export type {SkyObject};
-
 export {MESSIER, NGC_FAMOUS, BRIGHT_STARS};
 
 export interface DisplayObject extends SkyObject {

@@ -39,7 +39,6 @@ export function setCalibSleepForTests(fn: (ms: number) => Promise<void>) {
   sleep = fn;
 }
 
-const R2D = 180 / Math.PI;
 
 /** Annulation (v2.3.0 — l'utilisateur doit pouvoir ARRÊTER une mesure en
  *  cours) : drapeau consulté entre chaque phase motrice ; les mesures
@@ -269,16 +268,3 @@ export async function measureDrift(
   }
 }
 
-/** Diagnostic rapide : le gyro bouge-t-il alors qu'aucune commande n'est
- *  envoyée (vent, contact, table instable) — pour fiabiliser les mesures. */
-export function ambientNoiseDegPerSec(samples: GyroSample[]): number {
-  if (samples.length < 8) return 0;
-  const last = samples.slice(-40);
-  const bias = gyroBiasDegPerSec(last);
-  let max = 0;
-  for (const s of last) {
-    const m = rateMagnitudeDegPerSec({x: s.x * R2D - bias.x, y: s.y * R2D - bias.y, z: s.z * R2D - bias.z});
-    if (m > max) max = m;
-  }
-  return max;
-}

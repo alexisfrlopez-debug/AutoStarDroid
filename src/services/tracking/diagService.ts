@@ -72,6 +72,8 @@ let sleep: (ms: number) => Promise<void> = (ms) => new Promise<void>((r) => setT
 let now: () => number = () => Date.now();
 
 /** Injection pour les tests (temps virtuel) — ne pas utiliser en production. */
+import {R2D} from '../astro/telemetry';
+
 export function setDiagSleepForTests(fn: (ms: number) => Promise<void>) {
   sleep = fn;
   setCalibSleepForTests(fn);
@@ -131,7 +133,6 @@ export const DIAG_TEST_DURATIONS_S: Record<DiagTestId, number> = {
 export const DIAG_TOTAL_S = Object.values(DIAG_TEST_DURATIONS_S).reduce((a, b) => a + b, 0);
 
 const DIRS: PulseDir[] = ['n', 's', 'e', 'w'];
-const R2D = 180 / Math.PI;
 
 /** Fenêtre d'échantillonnage des décisions de butée (ms). */
 const LIMIT_TICK_MS = 400;

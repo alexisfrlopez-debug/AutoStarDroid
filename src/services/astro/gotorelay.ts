@@ -65,8 +65,6 @@ export interface RelayDecision {
 export const RELAY_TOLERANCE_DEG = 0.12;
 /** Passage slew → center en dessous de ce reste (deg). */
 export const RELAY_SLOW_AT_DEG = 2.5;
-/** Passage center → guide en dessous de ce reste (deg). */
-export const RELAY_FINE_AT_DEG = 0.5;
 /** Amortissement : on commande 80 % de l'arc pour ne pas rerfresher. */
 export const RELAY_DAMPING = 0.8;
 /** Un reste sous ce seuil est considéré NUL (bruit de lecture ±). */

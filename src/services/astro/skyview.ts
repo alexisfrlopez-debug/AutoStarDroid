@@ -19,6 +19,8 @@
  * 100 % pur TypeScript, aucune dépendance RN — testable sous Jest.
  */
 
+import {D2R, R2D} from './telemetry';
+
 export interface ViewItem {
   /** Hauteur/azimut de l'objet (deg) — azimut 0=N, 90=E. */
   altDeg: number;
@@ -46,8 +48,6 @@ export interface ViewGeometry {
   mirror: boolean;
 }
 
-const D2R = Math.PI / 180;
-const R2D = 180 / Math.PI;
 
 /** Vecteur unitaire (Est, Nord, Up) depuis alt/az (deg). */
 export function altAzToENU(altDeg: number, azDeg: number): [number, number, number] {

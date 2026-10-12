@@ -1,6 +1,9 @@
 /**
- * AutostarClient — moteur de protocole Meade (LX200 / Autostar / Autostar II).
+ * ScopeClient (nom historique : AutostarClient) — moteur de protocole.
  * File d'attente sérielle, gestion d'écho, délais, API haut niveau.
+ * v2.6.0 : le CODE protocole est délégué à un TelescopeDriver (Meade,
+ * Celestron NexStar, Sky-Watcher SynScan, iOptron) — le client reste
+ * propriétaire de la liaison, du polling, de la reconnexion et du relais.
  */
 import type {ConnectOptions, Transport, TransportType} from '../connection/types';
 import {TransportError} from '../connection/types';
@@ -8,51 +11,31 @@ import {TcpTransport} from '../connection/tcp';
 import {BluetoothTransport} from '../connection/bluetooth';
 import {UsbTransport, UsbSerialNative} from '../connection/usb';
 import {DemoTransport, setDemoSite} from '../connection/demo';
-import {SPEED_CMDS} from './profiles';
-import {proto, lonDegFromMeade} from '../astro/time';
+import {
+  DRIVERS, getDriver,
+  type DriverClient, type DriverId, type DriverPref, type TelescopeDriver,
+} from './driver';
+import './drivers'; // enregistre les 4 protocoles (import à effet de bord)
+import type {ScopeModelId} from '../../store/settingsStore';
+import {useSettingsStore} from '../../store/settingsStore';
+import {useScopeStore} from '../../store/scopeStore';
+import {useMotorCalibStore} from '../../store/motorCalibStore';
 import {
   raDeltaDeg, relayDecision, relaySignWasWrong,
   type RelayRates, type RelaySigns,
 } from '../astro/gotorelay';
 import {DEFAULT_SKY_RATES} from '../astro/tracking';
 import {raDecToAltAz} from '../astro/coords';
-import type {ScopeModelId} from '../../store/settingsStore';
-import {useSettingsStore} from '../../store/settingsStore';
-import {useScopeStore} from '../../store/scopeStore';
-import {useMotorCalibStore, type MotorSpeed} from '../../store/motorCalibStore';
+import {sleep} from '../util';
 
-export type Dir = 'n' | 's' | 'e' | 'w';
-export type Speed = keyof typeof SPEED_CMDS;
-
-export interface RaDec {raDeg: number; decDeg: number}
-
-/** Résultat d'un GOTO (v2.0.1, relais v2.5.0) — voir AutostarClient.gotoRaDec. */
-export type GotoStatus =
-  | 'ok' | 'belowHorizon' | 'noObject' | 'refused' | 'mute' | 'noLink'
-  | 'relayPartial'; // relais : approché mais pas dans la tolérance (butée/stalle)
-
-/** Textes i18n nécessaires pour traduire un statut de GOTO. */
-export interface GotoErrorTexts {
-  belowHorizon: string;
-  empty: string;
-  gotoNoLink: string;
-  gotoMute: string;
-  refused: string;
-  relayPartial: string;
-}
-
-/** Message localisé pour un statut de GOTO — partagé par tous les écrans
- *  (v2.0.1 : chaque cause a SON message : liaison morte, raquette muette,
- *  refus protocolaire — au lieu d'un « Connexion refusée » fourre-tout). */
-export function gotoErrorText(r: GotoStatus, x: GotoErrorTexts): string {
-  if (r === 'ok') return '';
-  return r === 'belowHorizon' ? x.belowHorizon
-    : r === 'noObject' ? x.empty
-    : r === 'noLink' ? x.gotoNoLink
-    : r === 'mute' ? x.gotoMute
-    : r === 'relayPartial' ? x.relayPartial
-    : x.refused;
-}
+/* API publique déplacée dans driver.ts (alias ré-exportés pour compat) : */
+export {gotoErrorText} from './driver';
+export {parseLcdReply} from './drivers/meade';
+export type Dir = import('./driver').Dir;
+export type Speed = import('./driver').Speed;
+export type RaDec = import('./driver').RaDec;
+export type GotoStatus = import('./driver').GotoStatus;
+export type GotoErrorTexts = import('./driver').GotoErrorTexts;
 
 /**
  * MIROIR LCD (v1.8.1) — le LCD de la raquette VIRTUELLE affiche le LITTÉRAL
@@ -65,17 +48,6 @@ export function gotoErrorText(r: GotoStatus, x: GotoErrorTexts): string {
  * (0x97 menus, 0x9F boot/vitesses, 0xD0/0xD1 saisie numérique…).
  */
 export const LCD_STALE_MS = 2500;
-
-/** Découpe une réponse :ED# en 2 lignes de 16 ; renvoie null si hors format. */
-export function parseLcdReply(reply: string): {line1: string; line2: string} | null {
-  if (reply.length < 32) return null;
-  const body = reply.slice(reply.length - 32); // tolère 1+ marqueurs en tête
-  const deDegree = (s: string) => s.replace(/\u00DF/g, '\u00B0');
-  return {
-    line1: deDegree(body.slice(0, 16)),
-    line2: deDegree(body.slice(16, 32)),
-  };
-}
 
 /**
  * Codes ASCII des touches physiques pour :EK<ascii># (simulation d'appuis
@@ -125,49 +97,14 @@ export function matchFirmware(product: string, version: string): ScopeModelId | 
   return null;
 }
 
-// Longitudes Meade : +DDD*MM (3 chiffres) — latitudes : ±DD*MM
-// Signe optionnel : certaines versions renvoient "45*23" pour +45°23'.
-const DEC_RE = /^([+-])?(\d{1,3})\D(\d{1,2})/;
+// Longitudes Meade et parsing du format → déplacés dans driver.ts
+// (parseMeadeRa / parseMeadeDec / VALID — partagés Meade + iOptron).
 
-function parseDec(s: string): number | null {
-  const m = s.trim().match(DEC_RE);
-  if (!m) return null;
-  return (m[1] === '-' ? -1 : 1) * (+m[2] + +m[3] / 60);
-}
-
-function parseRa(s: string): number | null {
-  // "HH:MM:SS" (Autostar) ou "HH:MM.T" (LX200 classique, dixièmes de minute)
-  const m = s.match(/^(\d{1,2}):(\d{2})(?::(\d{2})|\.(\d))?/);
-  if (!m) return null;
-  const h = +m[1];
-  const mm = +m[2];
-  const sec = m[3] ? +m[3] / 3600 : m[4] ? +m[4] / 10 / 60 : 0;
-  return (h + mm / 60 + sec) * 15;
-}
-
-/**
- * Format attendu des réponses, par commande. Sert à rejeter une réponse
- * « en retard » d'une commande expirée (raquette occupée pendant un moteur)
- * qui sinon serait attribuée à la commande suivante : une réponse hors
- * format est jetée, la vraie réponse qui suit est acceptée normalement.
- * IMPORTANT (v1.5.0) : le tampon série n'est PAS purgé entre deux commandes
- * — une réponse qui arrive APRÈS son délai d'attente reste dans le tampon
- * et sera consommée (rejetée ou acceptée) par la commande suivante. Purger
- * détruisait ces réponses tardives et faisait échouer la synchro en boucle
- * sur les raquettes qui répondent lentement (écran LCD en cours de
- * rafraîchissement, bus moteur occupé).
- */
-const VALID = {
-  ra: /^\d{1,2}:\d{2}/,          // :Gr# :GL#  → "HH:MM:SS" ou "HH:MM.T"
-  dec: /^[+-]?\d{1,3}[°*]\d{1,2}|^[+-]\d{1,3}:\d{1,2}/, // :Gd# :Ga# :Gz#… → "sDD*MM" (tolère "sDD:MM")
-  date: /^\d{1,2}\/\d{1,2}/,     // :GC# → "MM/JJ/AA"
-  tz: /^[+-]?\d/,                // :GG# → heures de décalage
-  bit: /^[01]$/,                 // :Sr# :Sd# → validé/refusé
-  digit: /^\d/,                  // :MS# → 0/1/2
-} as const;
-
-export class AutostarClient {
+export class AutostarClient implements DriverClient {
   private transport: Transport | null = null;
+  /** Driver de protocole actif (résolu à la connexion — Meade par défaut
+   *  hors connexion : l'UI peut lire drv.caps pour adapter les écrans). */
+  drv: TelescopeDriver = DRIVERS.meade ?? getDriver('meade');
   private queue: Promise<unknown> = Promise.resolve();
   private buffer = '';
   private pending: {cmd: string; expect?: RegExp; resolve: (s: string) => void; reject: (e: Error) => void; timer: number} | null = null;
@@ -234,13 +171,26 @@ export class AutostarClient {
    *  (les cycles où les axes sont muets pendant le moteur ne le font pas
    *  clignoter). */
   private slewFastUntil = 0;
-  private log = (dir: 'sent' | 'recv' | 'info' | 'error', text: string) =>
+  /** Journal partagé (public : partie du contrat DriverClient — les drivers
+   *  journalisent leurs refus/diagnostics dans la console de l'app). */
+  log = (dir: 'sent' | 'recv' | 'info' | 'error', text: string) =>
     useScopeStore.getState().pushLog(dir, text);
+  /** Avertissement utilisateur — chemin INDÉPENDANT de log() (les tests
+   *  silencient le trafic série sans perdre les avertissements). */
+  warn = (text: string) => useScopeStore.getState().pushLog('warn', text);
 
   isConnected() {return this.transport?.isConnected() ?? false;}
   getTransportType(): TransportType | null {return this.transport?.type ?? null;}
 
-  async connect(type: TransportType, opts: ConnectOptions, model: ScopeModelId): Promise<void> {
+  /* ---------- implémentation DriverClient (callbacks des drivers) ---------- */
+
+  transportAlive(): boolean {return this.transport?.isConnected() ?? false;}
+  /** Reset du parseur côté raquette (ESC ESC — utile aux raquettes Meade). */
+  async resetParser(): Promise<void> {
+    try {await this.transport?.write('\x1b\x1b'); await sleep(350);} catch (_) {}
+  }
+
+  async connect(type: TransportType, opts: ConnectOptions, model: ScopeModelId, prefDriver: DriverPref = 'auto'): Promise<void> {
     await this.disconnect();
     const store = useScopeStore.getState();
     store.setConnStatus('connecting');
@@ -291,21 +241,54 @@ export class AutostarClient {
       // ESC ESC SYSTÉMATIQUE (sauf démo) : bascule les Autostar #49x en mode
       // PC série. Le besoin dépend du MATÉRIEL réel, pas du modèle choisi —
       // l'envoyer quel que soit le modèle garantit qu'un #497 répond même si
-      // la présélection était mauvaise (les autres raquettes ignorent ces
+      // la présélection était mauvaise (les autres protocoles ignorent ces
       // octets). Sans cela, un #497 réveillé en dernier restait muet : c'est
       // le volet « liaison » du miroir qui ne démarrait jamais.
       try {await transport.write('\x1b\x1b'); await sleep(500);} catch (_) {}
-      this.log('info', 'Séquence ESC ESC envoyée (mode PC série Autostar)');
+      this.log('info', 'Séquence d\'éveil ESC ESC envoyée (mode PC série Autostar)');
     }
+    // RÉSOLUTION DU PROTOCOLE (v2.6.0) : préférence explicite = immédiat,
+    // 'auto' = sondes de détection (Meade, NexStar, iOptron). La démo est
+    // un Autostar II simulé : driver Meade imposé.
+    this.drv = transport.type === 'demo' ? getDriver('meade') : await this.resolveDriver(prefDriver);
+    useScopeStore.getState().setDriverId(this.drv.id);
+    this.log('info', `Protocole : ${this.drv.label} (${this.drv.id})`);
     useScopeStore.getState().setConnStatus('connected');
     useScopeStore.getState().setTransportType(transport.type);
     useScopeStore.getState().setModel(model);
     this.log('info', `Connecté (${transport.type}, modèle ${model})`);
     if (transport.type === 'demo') setDemoSite(0, 0); // site ajusté par les écrans
     this.startPoll();
-    handboxSync.enable(); // synchro temps réel par défaut dès la connexion
-    this.detectFirmware(); // mappage du clavier auto — asynchrone, non bloquant
+    if (this.drv.caps.lcdMirror) handboxSync.enable(); // synchro LCD (Meade seulement)
+    else handboxSync.reset();
+    this.detectFirmware(); // identification matérielle — asynchrone, non bloquant
     this.autoSyncScopeData(); // date/heure/site du téléphone → raquette (v2.1.2)
+  }
+
+  /**
+   * Résolution du protocole (v2.6.0). Préférence explicite → driver immédiat
+   * (chemin rapide, aucune sonde). 'auto' → sondes de détection dans l'ordre
+   * Meade (:GVP#), NexStar ('V'), iOptron (:MountInfo#) : chaque sonde teste
+   * le CONTENU de la réponse (un '?' Meade ou un chiffre isolé ne suffit
+   * pas) — la première classification gagne, à défaut Meade/LX200 est
+   * supposé (compatibilité la plus large, toutes commandes utiles).
+   */
+  async resolveDriver(pref: DriverPref): Promise<TelescopeDriver> {
+    if (pref !== 'auto' && DRIVERS[pref]) return DRIVERS[pref];
+    for (const id of ['meade', 'celestron', 'ioptron'] as DriverId[]) {
+      const drv = DRIVERS[id];
+      const p = drv.probe;
+      if (!p) continue;
+      try {
+        const reply = await this.cmd(p.cmd, p.timeoutMs, p.expect);
+        if (p.classify(reply)) {
+          this.log('info', `Protocole détecté (${p.cmd} → « ${reply.trim().slice(0, 24)} »)`);
+          return drv;
+        }
+      } catch (_) { /* muet sur cette sonde : sonde suivante */ }
+    }
+    this.log('info', 'Protocole non identifié — Meade/LX200 supposé (choisir la marque dans l\'onglet Connexion si besoin)');
+    return getDriver('meade');
   }
 
   /**
@@ -320,10 +303,16 @@ export class AutostarClient {
    */
   async detectFirmware() {
     try {
-      const {product, version} = await this.getFirmware();
-      const model = matchFirmware(product, version);
+      const {product, version} = await this.drv.firmware(this);
+      // matchFirmware ne s'applique qu'aux noms d'usine Meade
+      const model = this.drv.id === 'meade' ? matchFirmware(product, version) : null;
       const s = useScopeStore.getState();
       s.setFirmware(product, version, model);
+      if (this.drv.id === 'celestron' || this.drv.id === 'skywatcher') {
+        // mode d'axes des flèches déduit du tracking réel ('t')
+        const drv = this.drv as import('./drivers/nexstar').NexStarDriver;
+        await drv.refreshAxisMode(this).catch(() => undefined);
+      }
       if (model) {
         // Configuration optimale : le modèle détecté est appliqué à toute
         // l'app (capacités, menus, clavier) et sélectionné dans l'onglet
@@ -332,7 +321,7 @@ export class AutostarClient {
         s.setModel(model);
         s.pushLog('info', `Firmware détecté : ${product} ${version} → configuration ${model} appliquée`);
       } else {
-        s.pushLog('info', `Firmware : ${product} ${version} — non reconnu, modèle de l'onglet Connexion conservé`);
+        s.pushLog('info', `Firmware : ${product} ${version} — ${this.drv.id === 'meade' ? "non reconnu, modèle de l'onglet Connexion conservé" : `protocole ${this.drv.label}`}`);
       }
     } catch {
       useScopeStore.getState().pushLog('info', 'Firmware illisible — modèle de l\'onglet Connexion conservé');
@@ -370,9 +359,11 @@ export class AutostarClient {
     this.lcdFail = 0;
     this.lcdLogged = false;
     handboxSync.reset(); // purge synchro + état physique (mêmes IDs que onClosed)
+    this.drv = getDriver('meade'); // driver par défaut hors connexion
     const s = useScopeStore.getState();
     s.setConnStatus('disconnected');
     s.setTransportType(null);
+    s.setDriverId(null);
     s.setFirmware(null, null, null);
     s.setHbHint('none');
   }
@@ -599,17 +590,13 @@ export class AutostarClient {
     }
   }
 
-  /* ---------- API haut niveau ---------- */
+  /* ---------- API haut niveau (ROUTÉE vers le driver actif) ---------- */
 
   async getRaDec(timeoutMs = 3000): Promise<RaDec> {
-    // séquentiel avec échec rapide : si :Gr# ne répond pas, inutile d'attendre
-    // aussi :Gd# (raquette muette sur la position = cycle 2× plus court)
-    const ra = await this.cmd(':Gr#', timeoutMs, VALID.ra);
-    const dec = await this.cmd(':Gd#', timeoutMs, VALID.dec);
-    const raDeg = parseRa(ra);
-    const decDeg = parseDec(dec);
-    if (raDeg === null || decDeg === null) throw new TransportError('Réponse position illisible');
-    return {raDeg, decDeg};
+    if (!this.drv.caps.position) throw new TransportError('Position non disponible sur ce protocole');
+    return this.drv.getRaDec
+      ? this.drv.getRaDec(this, timeoutMs)
+      : (await this.drv.readPosition(this, timeoutMs)) as RaDec;
   }
 
   /**
@@ -620,29 +607,16 @@ export class AutostarClient {
    * Autostar est minuscule, deux commandes collées peuvent perdre la 2e.
    */
   async readPosition(): Promise<{raDeg: number | null; decDeg: number | null}> {
+    if (!this.drv.caps.position) return {raDeg: null, decDeg: null};
     // Timeout ADAPTATIF : si aucun axe ne répond depuis plusieurs cycles
     // (liaison muette), on raccourcit l'attente pour ne pas geler le rythme
     // du miroir ni retarder la reprise dès que la raquette se réveille.
     const mute = this.lastPosAt > 0 && Date.now() - this.lastPosAt > 6000;
-    const timeout = mute ? 1800 : 3000;
-    let raDeg: number | null = null;
-    let decDeg: number | null = null;
-    try {
-      const ra = await this.cmd(':Gr#', timeout, VALID.ra);
-      raDeg = parseRa(ra);
-    } catch (_) { /* axe muet ce cycle */ }
-    await sleep(40);
-    try {
-      const dec = await this.cmd(':Gd#', timeout, VALID.dec);
-      decDeg = parseDec(dec);
-    } catch (_) { /* axe muet ce cycle */ }
-    return {raDeg, decDeg};
+    return this.drv.readPosition(this, mute ? 1800 : 3000);
   }
 
   async getFirmware(): Promise<{product: string; version: string}> {
-    const product = await this.cmd(':GVP#').catch(() => '?');
-    const version = await this.cmd(':GVN#').catch(() => '?');
-    return {product, version};
+    return this.drv.firmware(this);
   }
 
   /**
@@ -651,38 +625,35 @@ export class AutostarClient {
    * est muette ce cycle — l'appelant garde alors son écran précédent.
    */
   async getLcd(): Promise<{line1: string; line2: string} | null> {
-    const reply = await this.cmd(':ED#', 900, /^[\u0080-\u00FF]/).catch(() => '');
-    return parseLcdReply(reply);
+    if (!this.drv.caps.lcdMirror || !this.drv.lcd) return null;
+    return this.drv.lcd(this);
   }
 
-  /** Réponse BRUTE :ED# (marqueur inclus, '#' retiré par le parseur de
-   *  réponses) — pour les pilotes qui lisent la flèche de SÉLECTION (octet
-   *  de contrôle en tête de la ligne sélectionnée) : navigation des menus
-   *  de la raquette physique (handboxPush v2.2.0). */
+  /** Réponse BRUTE du LCD de la raquette physique (flèche de SÉLECTION,
+   *  handboxPush) — null hors Meade ou raquette muette. */
   async getLcdRaw(): Promise<string | null> {
-    const reply = await this.cmd(':ED#', 900, /^[\u0080-\u00FF]/).catch(() => '');
-    return reply && reply.length >= 32 ? reply : null;
+    if (!this.drv.caps.lcdMirror || !this.drv.lcdRaw) return null;
+    return this.drv.lcdRaw(this);
   }
 
   /**
    * Simule un appui de touche SUR la raquette physique (:EK<ascii>#).
-   * La raquette réagit exactement comme si la touche avait été pressée
-   * (menus, navigation, GO TO sur son dernier objet) — et son écran,
-   * relu par :ED#, se répercute sur la raquette virtuelle : c'est le
-   * comportement du Hand Control Panel d'AutostarSuite.
+   * Meade uniquement — no-op silencieux (journalisé) pour les autres.
    */
   async keyPress(code: number): Promise<void> {
-    await this.cmdSilent(`:EK${code}#`);
+    if (!this.drv.caps.keyPress || !this.drv.keyPress) return;
+    await this.drv.keyPress(this, code);
   }
 
   async setSpeed(speed: Speed) {
-    await this.cmdSilent(SPEED_CMDS[speed]);
+    if (!this.drv.caps.relay) return;
+    await this.drv.setSpeed(this, speed);
+    this.ownMoveUntil = Math.max(this.ownMoveUntil, Date.now() + 1200);
   }
 
   async startMove(dir: Dir) {
-    const map: Record<Dir, string> = {n: ':Mn#', s: ':Ms#', e: ':Me#', w: ':Mw#'};
     this.bump();
-    await this.cmdSilent(map[dir]);
+    await this.drv.startMove(this, dir);
     this.ownMoveUntil = Date.now() + 2500; // mouvement attribué à l'app
   }
 
@@ -703,8 +674,8 @@ export class AutostarClient {
 
   /** Priorité aux commandes utilisateur : les ticks de polling sont sautés
    *  un court instant pour que l'appui soit exécuté sans attendre le cycle
-   *  de lecture en cours. */
-  private bump() {
+   *  de lecture en cours. (public : partie du contrat DriverClient) */
+  bump() {
     this.priorityUntil = Date.now() + 700;
   }
 
@@ -722,91 +693,31 @@ export class AutostarClient {
   }
 
   async stopMove(dir: Dir) {
-    const map: Record<Dir, string> = {n: ':Qn#', s: ':Qs#', e: ':Qe#', w: ':Qw#'};
     this.bump();
-    await this.cmdSilent(map[dir]);
+    await this.drv.stopMove(this, dir);
     this.ownMoveUntil = Date.now() + 1200;
   }
 
   async stopAll() {
     this.bump();
-    await this.cmdSilent(':Q#');
+    await this.drv.stopAll(this);
     this.ownMoveUntil = Date.now() + 1200;
   }
 
-  /** Pose la cible (:Sr OU :Sd) avec la ROBUSTESSE complète (v2.0.1) :
-   *  - refus explicite ("0") → l'AUTRE précision est essayée (v1.8.1) ;
-   *  - AUCUNE réponse (délai dépassé) → la raquette est muette : reset du
-   *    parseur par ESC ESC (même séquence que la connexion) puis UNE
-   *    retentative du même format — l'échec muet n'est pas une histoire de
-   *    format, inutile d'insister sur l'autre précision ;
-   *  - écriture impossible / transport mort → 'noLink' + état de connexion
-   *    remis à zéro (fini le « connected » fantôme après un câble retiré).
-   *  Renvoie '1' (accepté), '0' (refus EXPLICITE de la raquette),
-   *  'mute' (toujours muette après reset) ou 'noLink'. */
-  private async setTargetBit(prefix: string, formats: string[]): Promise<'1' | '0' | 'mute' | 'noLink'> {
-    let explicitRefused = false;
-    for (const f of formats) {
-      const full = `${prefix}${f}#`;
-      let r: string;
-      try {
-        r = await this.cmd(full, 2500, VALID.bit);
-      } catch (_) {
-        if (!this.transport?.isConnected()) {
-          this.handleLinkClosed();
-          return 'noLink';
-        }
-        // muette : reset parseur (ESC ESC) puis UNE retentative
-        try {await this.transport.write('\x1b\x1b'); await sleep(350);} catch (_) {}
-        try {
-          r = await this.cmd(full, 2500, VALID.bit);
-        } catch (_) {
-          if (!this.transport?.isConnected()) {
-            this.handleLinkClosed();
-            return 'noLink';
-          }
-          return 'mute'; // raquette muette même après reset — pas un problème de format
-        }
-      }
-      if (r === '1') return '1';
-      explicitRefused = true; // « 0 » explicite : la raquette VIT et refuse → autre précision
-    }
-    return explicitRefused ? '0' : 'mute';
-  }
+  // setTargetBit / probeSlewStarted : logique Meade déplacée dans
+  // drivers/meade.ts (setTargetBit, probeSlewStarted) — le client route.
 
-  /** :MS muet — le GOTO a PEUT-ÊTRE démarré quand même (raquettes qui
-   *  n'accusent pas réception avant de slewer). Sonde :D# (barre "|" pendant
-   *  le moteur, vide à l'arrêt — spec Autostar) : "|" → le slew EST parti.
-   *  ~4 s max, tolérante aux cycles muets pendant le moteur. */
-  private async probeSlewStarted(tries = 4): Promise<boolean> {
-    for (let i = 0; i < tries; i++) {
-      await sleep(700);
-      if (!this.isConnected()) return false;
-      try {
-        const d = await this.cmd(':D#', 1500);
-        if (d.includes('|')) return true; // monture EN MOUVEMENT : le GOTO est parti
-        if (d === '') return false; // monture À L'ARRÊT : :MS est resté sans effet
-      } catch (_) { /* muette ce cycle : on retente */ }
-    }
-    return false;
-  }
-
-  /** GOTO vers RA/Dec. Renvoie un statut FIN (v2.0.1) :
-   *  'ok'          — slew parti (ou confirmé parti par sonde :D#) ;
-   *  'belowHorizon'— :MS = 1 (objet sous l'horizon) ;
-   *  'noObject'    — :MS = 2 (objet introuvable/range) ;
-   *  'refused'     — REFUS EXPLICITE de la raquette (:Sr/:Sd = 0 dans les
-   *                  deux précisions, ou :MS code inattendu) ;
-   *  'mute'        — raquette muette (aucune réponse, même après ESC ESC) —
-   *                  le GOTO a peut-être malgré tout démarré (sondé par :D#) ;
-   *  'noLink'      — liaison morte (écriture impossible) : état remis à zéro,
-   *                  il faut se reconnecter.
-   *  ROBUSTESSE (v1.8.1) : le format des coordonnées dépend du mode de
-   *  précision de la raquette (haute "HH:MM:SS"/"sDD*MM:SS", basse
-   *  "HH:MM.T"/"sDD*MM") — un format refusé ("0") est retenté dans
-   *  l'autre précision AVANT de renoncer : un GO TO ne doit jamais échouer
-   *  pour une histoire de format. La fin du slew est suivie par :D#
-   *  (barre "|" pendant le moteur, chaîne vide à l'arrivée — spec Autostar). */
+  /** GOTO vers RA/Dec. Renvoie un statut FIN (v2.0.1, relais v2.5.0,
+   *  multi-protocoles v2.6.0) :
+   *  'ok'          — slew parti (confirmé par le protocole ou sa sonde) ;
+   *  'belowHorizon'— refus honnête du protocole (objet sous l'horizon) ;
+   *  'noObject'    — objet introuvable/hors limites du protocole ;
+   *  'refused'     — REFUS EXPLICITE de la monture (cible rejetée) ;
+   *  'mute'        — aucune réponse — le GOTO a peut-être démarré (sonde) ;
+   *  'noLink'      — liaison morte : état remis à zéro, reconnexion auto.
+   *  En cas d'échec de LIAISON (mute/refus muet/noLink), le RELAIS (v2.5.0)
+   *  prend le relais en boucle fermée avec les primitives de jog du driver
+   *  — multi-marques depuis v2.6.0 (Meade, NexStar, SynScan, iOptron). */
   async gotoRaDec(raDeg: number, decDeg: number, horizonNow?: Date): Promise<GotoStatus> {
     this.bump();
     // PHASE CRITIQUE (v2.1.1) : le polling (:ED#/:Gr#/:Gd#) est suspendu
@@ -817,14 +728,24 @@ export class AutostarClient {
     this.cmdPhase = true;
     try {
       const r = await this.gotoRaDecInner(raDeg, decDeg);
+      if (r === 'ok') {
+        // GOTO parti : fenêtre « mouvement app » + suivi de fin + notifications
+        this.ownMoveUntil = Math.max(this.ownMoveUntil, Date.now() + 45000);
+        this.notifyGotoStart(); // v2.3.0 : moniteur contrôle croisé armé
+        this.watchSlewEnd();
+      }
       // RELAIS (v2.5.0 — cause racine « GOTO lancé depuis l'app = raquette
       // déconnectée ») : sur certaines raquettes (DS/Autostar série lente),
-      // :Sr/:Sd/:MS échoue ALORS QUE lectures de position et moteurs
+      // la séquence directe échoue ALORS QUE lectures de position et moteurs
       // fonctionnent (socle éprouvé des flèches/suivi/réglage fin). Les
       // réponses honnêtes du protocole (objet sous l'horizon, introuvable)
       // ne déclenchent PAS de relais ; les échecs de LIAISON (mute, refus
       // muet, liaison tombée) oui — après rétablissement automatique.
       if (r === 'ok' || r === 'belowHorizon' || r === 'noObject') return r;
+      if (!this.drv.caps.relay) {
+        this.log('error', 'RELAIS indisponible sur ce protocole — GOTO abandonné');
+        return r;
+      }
       return await this.gotoRaDecRelay(raDeg, decDeg, r, horizonNow);
     } finally {
       this.cmdPhase = false;
@@ -848,14 +769,13 @@ export class AutostarClient {
   private relayRates(): RelayRates {
     const mc = useMotorCalibStore.getState();
     const rateFor = (s: 'slew' | 'center'): number => {
-      const spd: MotorSpeed = s;
-      if (mc.apply && mc.rates && mc.rates.speed === spd) {
+      if (mc.apply && mc.rates && mc.rates.speed === s) {
         const raMeas = mc.rates.e ?? mc.rates.w;
         const decMeas = mc.rates.n ?? mc.rates.s;
         const m = Math.min(raMeas ?? Infinity, decMeas ?? Infinity);
         if (Number.isFinite(m) && m > 1e-4) return m;
       }
-      return DEFAULT_SKY_RATES[spd];
+      return DEFAULT_SKY_RATES[s];
     };
     return {slew: rateFor('slew'), center: rateFor('center')};
   }
@@ -1036,50 +956,13 @@ export class AutostarClient {
     }
   }
 
+  /** Chemin DIRECT du GOTO (délégué au driver actif — Meade robuste v2.0.1,
+   *  NexStar 'r', iOptron :MS#) — séparé pour les tests et le relais. */
   private async gotoRaDecInner(raDeg: number, decDeg: number): Promise<GotoStatus> {
     this.bump();
-    const r1 = await this.setTargetBit(':Sr', [proto.raCmd(raDeg), proto.raCmdLow(raDeg)]);
-    if (r1 !== '1') {
-      this.log('error', `GO TO : AD refusée par la raquette (${
-        r1 === '0' ? ':Sr = 0, les 2 précisions' : r1 === 'mute' ? 'aucune réponse, même après ESC ESC' : 'liaison morte'})`);
-      return r1 === '0' ? 'refused' : r1;
-    }
-    const r2 = await this.setTargetBit(':Sd', [proto.decCmdHigh(decDeg), proto.decCmd(decDeg)]);
-    if (r2 !== '1') {
-      this.log('error', `GO TO : DEC refusée par la raquette (${
-        r2 === '0' ? ':Sd = 0, les 2 précisions' : r2 === 'mute' ? 'aucune réponse, même après ESC ESC' : 'liaison morte'})`);
-      return r2 === '0' ? 'refused' : r2;
-    }
-    let ms = '';
-    try {
-      ms = await this.cmd(':MS#', 5000, VALID.digit);
-    } catch (_) {
-      if (!this.transport?.isConnected()) {
-        this.handleLinkClosed();
-        return 'noLink';
-      }
-      // :MS muet — le slew a peut-être démarré : on SONDE :D# avant d'échouer
-      this.log('info', 'GO TO : :MS sans réponse — sonde :D# (slew parti ?)');
-      if (await this.probeSlewStarted()) {
-        this.log('info', 'GO TO : monture en mouvement détectée — slew confirmé parti');
-        this.ownMoveUntil = Date.now() + 45000;
-        this.notifyGotoStart(); // v2.3.0 : moniteur contrôle croisé armé
-        this.watchSlewEnd();
-        return 'ok';
-      }
-      this.log('error', 'GO TO : raquette muette (:MS et :D# sans réponse) — vérifiez la liaison, appuyez MODE sur la raquette puis réessayez');
-      return 'mute';
-    }
-    if (ms === '0') {
-      this.ownMoveUntil = Date.now() + 45000; // GOTO : slew possiblement long
-      this.notifyGotoStart(); // v2.3.0 : moniteur contrôle croisé armé
-      this.watchSlewEnd();
-      return 'ok';
-    }
-    if (ms === '1') return 'belowHorizon';
-    if (ms === '2') return 'noObject';
-    this.log('error', `GO TO : :MS réponse inattendue « ${ms} »`);
-    return 'refused';
+    const r = await this.drv.goto(this, raDeg, decDeg);
+    if (r === 'noLink') this.handleLinkClosed(); // état « connected » fantôme interdit
+    return r;
   }
 
   /** Suit la fin du GOTO par :D# ("|" pendant le moteur, vide à l'arrivée).
@@ -1092,9 +975,9 @@ export class AutostarClient {
     if (cycles > 260) return; // ~3 min à 700 ms
     setTimeout(() => {
       if (!this.isConnected()) return;
-      this.cmd(':D#', 1500)
-        .then((d) => {
-          if (d === '') {
+      this.isMoving()
+        .then((moving) => {
+          if (moving === false) {
             const s = useScopeStore.getState();
             s.pushLog('info', 'GOTO terminé (monture arrivée)');
             this.ownMoveUntil = Date.now() + 1200;
@@ -1149,132 +1032,68 @@ export class AutostarClient {
     return {raDeg: this.lastRaDeg, decDeg: this.lastDecDeg};
   }
 
-  /** Le moteur est-il en marche ? (:D# — "|" en mouvement, vide à l'arrêt).
-   *  null = raquette muette (réponse indéterminée). */
+  /** Le moteur est-il en marche ? (Meade :D# — "|" en mouvement, vide à
+   *  l'arrêt ; NexStar 'L' — '1'/'0'.) null = indéterminé (muette/protocole
+   *  sans sonde) — les appelants basculent alors sur la stabilisation. */
   async isMoving(): Promise<boolean | null> {
+    if (!this.drv.caps.isMoving) return null;
     try {
-      const d = await this.cmd(':D#', 1500);
-      return d.includes('|');
+      return await this.drv.isMoving(this);
     } catch (_) {
       return null;
     }
   }
 
   async syncHere(): Promise<void> {
-    await this.cmdSilent(':CM#');
+    if (!this.drv.caps.syncHere) {
+      throw new TransportError('SYNC ici non disponible sur ce protocole');
+    }
+    await this.drv.syncHere(this);
   }
 
   /**
    * SYNC sur des coordonnées données (v1.9.0, recalage télémétrie) :
-   * :Sr/:Sd posent la cible puis :CM# déclare la position physique courante
-   * = ces coordonnées. Met à jour l'alignement INTERNE de l'Autostar sans
-   * GOTO. Renvoie false si la raquette refuse :Sr/:Sd (explicitement ou par
-   * mutisme — la même robustesse que le GOTO v2.0.1 s'applique).
+   * pose la cible puis déclare la position physique courante = ces
+   * coordonnées (Meade :Sr/:Sd/:CM# · NexStar 's' · iOptron :Sr/:Sd/:CM#).
+   * Met à jour l'alignement INTERNE de la monture sans GOTO. Renvoie false
+   * si la monture refuse (explicitement ou par mutisme).
    */
   async syncRaDec(raDeg: number, decDeg: number): Promise<boolean> {
     this.bump();
+    if (!this.drv.caps.sync) {
+      this.log('error', 'SYNC non disponible sur ce protocole');
+      return false;
+    }
     this.cmdPhase = true; // même réservation de la ligne série que le GOTO
     try {
-      return await this.syncRaDecInner(raDeg, decDeg);
+      return await this.drv.syncRaDec(this, raDeg, decDeg);
     } finally {
       this.cmdPhase = false;
     }
   }
 
-  private async syncRaDecInner(raDeg: number, decDeg: number): Promise<boolean> {
-    this.bump();
-    const r1 = await this.setTargetBit(':Sr', [proto.raCmd(raDeg), proto.raCmdLow(raDeg)]);
-    if (r1 !== '1') {
-      this.log('error', `SYNC : AD refusée (${r1 === '0' ? ':Sr = 0' : r1 === 'mute' ? 'raquette muette' : 'liaison morte'})`);
-      return false;
-    }
-    const r2 = await this.setTargetBit(':Sd', [proto.decCmdHigh(decDeg), proto.decCmd(decDeg)]);
-    if (r2 !== '1') {
-      this.log('error', `SYNC : DEC refusée (${r2 === '0' ? ':Sd = 0' : r2 === 'mute' ? 'raquette muette' : 'liaison morte'})`);
-      return false;
-    }
-    await this.cmdSilent(':CM#');
-    return true;
-  }
-
-  /** Lecture date/heure/site de la raquette (commande utilisateur). */
+  /** Lecture date/heure/site de la monture (commande utilisateur). */
   async readScopeData(): Promise<{
     time: string; date: string; tz: string; latDeg: number | null; lonDeg: number | null;
   }> {
     this.bump();
-    const [time, date, tz, lat, lon] = await Promise.all([
-      this.cmd(':GL#', 3000, VALID.ra), this.cmd(':GC#', 3000, VALID.date),
-      this.cmd(':GG#', 3000, VALID.tz),
-      this.cmd(':Gt#', 3000, VALID.dec).catch(() => ''),
-      this.cmd(':Gg#', 3000, VALID.dec).catch(() => ''),
-    ]);
-    // v2.2.1 — MEADE → cartographique :
-    //  - :Gg# renvoie la longitude avec l'EST NÉGATIF ("-002*21" pour Paris)
-    //    ou en 0-360 Ouest-positif ("357*39") selon le firmware — les deux
-    //    formes sont converties vers Est-positif (lonDegFromMeade) ;
-    //  - :GG# renvoie les heures ajoutées à l'heure locale pour obtenir UTC
-    //    ("-02" en France été) — affiché en convention standard ("+02.0").
-    const lonMeade = parseDec(lon);
-    const tzMeade = parseFloat(tz);
-    return {
-      time,
-      date,
-      tz: Number.isNaN(tzMeade) ? tz : String(-tzMeade),
-      latDeg: parseDec(lat),
-      lonDeg: lonMeade === null ? null : lonDegFromMeade(lonMeade),
-    };
+    if (!this.drv.caps.readSite || !this.drv.readSite) {
+      throw new TransportError('Lecture date/site non disponible sur ce protocole');
+    }
+    return this.drv.readSite(this);
   }
 
-  /** Envoie date/heure/site du téléphone vers la raquette. Les commandes
-   *  :SG/:SL/:SC/:St/:Sg RÉPONDENT ("1") — la réponse est consommée (et
-   *  tolérée si muette) au lieu de rester dans le tampon série.
-   *  Renvoie (v2.1.2) l'heure/date LOCALES envoyées ('HH:MM:SS' / 'MM/JJ/AA')
-   *  pour que l'appelant (sync manuelle ou auto) rafraîchisse l'affichage.
-   *  v2.2.1 — CONVENTIONS MEADE (protocole révision 2010.10, cf. INDI) :
-   *   - :SG = heures à AJOUTER à l'heure LOCALE pour obtenir UTC, soit
-   *     UTC − local — l'opposé du décalage cartographique (France été →
-   *     "−02.0", EST américain → "+05.0") ;
-   *   - :Sg = longitude signée avec l'EST NÉGATIF (Paris → "−002*21").
-   *     L'ancien code envoyait la valeur Est-positive brute : la raquette
-   *     lisait « 2°21' OUEST » pour Paris → TSL décalé, pointage AD décalé
-   *     (sensation d'Est/Ouest inversés).
-   *   - un refus explicite ("0") est journalisé : un site/fuseau refusé
-   *     laissait la raquette sur ses valeurs manuelles, sans le dire. */
+  /** Envoie date/heure/site du téléphone vers la monture (Meade :
+   *  :SG/:SL/:SC/:St/:Sg avec conventions Est-négatif/UTC−local v2.2.1).
+   *  Renvoie l'heure/date LOCALES envoyées ('HH:MM:SS' / 'MM/JJ/AA').
+   *  Lève TransportError sur les protocoles sans push (NexStar v1 — les
+   *  commandes H/W binaires sont volontairement évitées). */
   async pushPhoneData(latDeg: number, lonDeg: number): Promise<{time: string; date: string}> {
     this.bump();
-    const now = new Date();
-    const tzOffsetMin = -now.getTimezoneOffset(); // standard : local − UTC (+120 France été)
-    // :SG accepte les heures décimales fractionnaires (ex. +05.5 pour l'Inde)
-    const tzH = Math.floor(Math.abs(tzOffsetMin) / 60);
-    const tzM = Math.abs(tzOffsetMin) % 60;
-    const tzVal = (tzH + tzM / 60).toFixed(1).padStart(4, '0');
-    // heure locale de la raquette
-    const local = new Date(now.getTime() + tzOffsetMin * 60000);
-    const hh = String(local.getUTCHours()).padStart(2, '0');
-    const mm = String(local.getUTCMinutes()).padStart(2, '0');
-    const ss = String(local.getUTCSeconds()).padStart(2, '0');
-    const dd = String(local.getUTCDate()).padStart(2, '0');
-    const mo = String(local.getUTCMonth() + 1).padStart(2, '0');
-    const yy = String(local.getUTCFullYear()).slice(2);
-    const rejected: string[] = [];
-    const send = async (cmdStr: string, timeoutMs: number) => {
-      const r = await this.cmd(cmdStr, timeoutMs, VALID.bit).catch(() => null);
-      if (r === '0') rejected.push(cmdStr.slice(0, 3));
-    };
-    await send(`:SG${tzOffsetMin >= 0 ? '-' : '+'}${tzVal}#`, 2000);
-    await sleep(120);
-    await send(`:SL${hh}:${mm}:${ss}#`, 2000);
-    await sleep(120);
-    await send(`:SC${mo}/${dd}/${yy}#`, 2500);
-    await sleep(400);
-    await send(`:St${proto.decCmd(latDeg)}#`, 2000);
-    await sleep(120);
-    await send(`:Sg${proto.lonCmd(lonDeg)}#`, 2000);
-    if (rejected.length > 0) {
-      useScopeStore.getState().pushLog('warn',
-        `Raquette : commandes refusées (${rejected.join(', ')}) — fuseau/site non appliqués, vérifiez Réglages`);
+    if (!this.drv.caps.pushSite || !this.drv.pushSite) {
+      throw new TransportError('Envoi date/site non disponible sur ce protocole');
     }
-    return {time: `${hh}:${mm}:${ss}`, date: `${mo}/${dd}/${yy}`};
+    return this.drv.pushSite(this, latDeg, lonDeg);
   }
 
   /**
@@ -1301,6 +1120,7 @@ export class AutostarClient {
         setDemoSite(latDeg, lonDeg);
         return;
       }
+      if (!this.drv.caps.pushSite) return; // protocole sans push : silencieux
       // petit délai : laisse la détection firmware (:GVP#/:GVN#) passer d'abord
       await sleep(600);
       if (!this.transport) return; // déconnecté entre-temps
@@ -1317,37 +1137,50 @@ export class AutostarClient {
     }
   }
 
+  /** Modes de suivi (altaz/polaire/terrestre) — driver + latitude du site
+   *  (NexStar : 'T2' éq nord / 'T3' éq sud selon l'hémisphère). */
   async setTracking(mode: 'altaz' | 'polar' | 'land') {
-    const map = {altaz: ':AA#', polar: ':AP#', land: ':AL#'};
-    await this.cmdSilent(map[mode]);
+    if (!this.drv.caps.trackingModes || !this.drv.setTracking) return;
+    const lat = useSettingsStore.getState().site.latDeg;
+    await this.drv.setTracking(this, mode, lat);
   }
 
+  /** Assistant d'alignement du protocole (Meade :Aa# easy) — les autres
+   *  protocoles n'en ont pas : l'app fournit son propre flux 1-2 étoiles. */
   async startAlign(kind: 'easy' | 'one' | 'two') {
-    const map = {easy: ':Aa#', one: ':Ab#', two: ':Ac#'};
-    await this.cmdSilent(map[kind]);
+    if (!this.drv.caps.alignWizards || !this.drv.startAlign) {
+      throw new TransportError('Assistant d\'alignement non disponible sur ce protocole');
+    }
+    await this.drv.startAlign(this, kind);
   }
 
   async focusStart(inward: boolean) {
-    await this.cmdSilent(inward ? ':F-#' : ':F+#');
+    if (!this.drv.caps.focus || !this.drv.focusStart) return;
+    await this.drv.focusStart(this, inward);
   }
   async focusStop() {
-    await this.cmdSilent(':FQ#');
+    if (!this.drv.caps.focus || !this.drv.focusStop) return;
+    await this.drv.focusStop(this);
   }
 
-  /** Vitesse du moteur de mise au point (panneau ASU « Focus Speed ») :
-   *  commandes LX200 classiques :FS#/:FM#/:FF# — silencieuses : une raquette
-   *  qui ne les connaît pas les ignore sans erreur. */
+  /** Vitesse du moteur de mise au point (Meade :FS#/:FM#/:FF#). */
   async setFocusSpeed(s: 'slow' | 'medium' | 'fast') {
-    await this.cmdSilent(s === 'fast' ? ':FF#' : s === 'medium' ? ':FM#' : ':FS#');
+    if (!this.drv.caps.focus || !this.drv.setFocusSpeed) return;
+    await this.drv.setFocusSpeed(this, s);
   }
 
   /** Réticule illuminé du LX200 classique : luminosité ± (:B+ / :B-). */
   async reticleAdjust(delta: 1 | -1) {
-    await this.cmdSilent(delta > 0 ? ':B+#' : ':B-#');
+    if (!this.drv.caps.reticle || !this.drv.reticleAdjust) return;
+    await this.drv.reticleAdjust(this, delta);
   }
 
+  /** Parc (Meade :hP#) — non disponible hors Meade en v2.6.0. */
   async park() {
-    await this.cmdSilent(':hP#');
+    if (!this.drv.caps.park || !this.drv.park) {
+      throw new TransportError('Parc non disponible sur ce protocole');
+    }
+    await this.drv.park(this);
   }
 
   /* ---------- polling position (synchro temps réel) ---------- */
@@ -1378,11 +1211,11 @@ export class AutostarClient {
       this.pollBusy = true;
       try {
         const s0 = useScopeStore.getState();
-        const live = s0.hbSync === 'live';
-        // MIROIR LCD (v1.8.1) : :ED# à chaque tick en synchro live — le
-        // littéral de l'écran de la raquette physique prime sur toute
-        // reconstruction. Repli : si la raquette ne connaît pas :ED#
-        // (6 échecs de suite), l'écran télémétrie reprend la main.
+        const live = s0.hbSync === 'live' && this.drv.caps.lcdMirror;
+        // MIROIR LCD (v1.8.1, Meade uniquement) : :ED# à chaque tick en
+        // synchro live — le littéral de l'écran de la raquette physique
+        // prime sur toute reconstruction. Repli : si la raquette ne connaît
+        // pas :ED# (6 échecs de suite), l'écran télémétrie reprend la main.
         if (live) {
           const lcd = await this.getLcd();
           if (lcd) {
@@ -1554,7 +1387,7 @@ export class AutostarClient {
     // sonde de liaison toutes les 10 s max (hors mouvement)
     if (!this.isBusyNow() && now - this.lastProbeAt > 10000) {
       this.lastProbeAt = now;
-      this.cmd(':GVP#', 2500)
+      this.cmd(this.drv.probe?.cmd ?? ':GVP#', 2500)
         .then((p) => {
           if (p && p !== '?') {
             useScopeStore.getState().pushLog('info',
@@ -1618,17 +1451,10 @@ export class AutostarClient {
   }
 
   private async pollAltAz(): Promise<{altDeg: number; azDeg: number} | null> {
-    const [alt, az] = await Promise.all([
-      this.cmd(':Ga#', 2500, VALID.dec).catch(() => ''),
-      this.cmd(':Gz#', 2500, VALID.dec).catch(() => ''),
-    ]);
-    const altDeg = parseDec(alt.trim().match(/^[+-]/) ? alt : `+${alt}`);
-    const azDeg = parseDec(az.trim().match(/^[+-]/) ? az : `+${az}`);
-    if (altDeg !== null && azDeg !== null) {
-      useScopeStore.getState().setAltAz(altDeg, azDeg);
-      return {altDeg, azDeg};
-    }
-    return null;
+    if (!this.drv.caps.altAz || !this.drv.readAltAz) return null;
+    const aa = await this.drv.readAltAz(this).catch(() => null);
+    if (aa) useScopeStore.getState().setAltAz(aa.altDeg, aa.azDeg);
+    return aa;
   }
 
   private stopPoll() {
@@ -1639,9 +1465,6 @@ export class AutostarClient {
   }
 }
 
-function sleep(ms: number) {
-  return new Promise<void>((r) => setTimeout(r, ms));
-}
 
 /** Instance unique partagée. */
 export const autostar = new AutostarClient();

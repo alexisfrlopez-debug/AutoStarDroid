@@ -1,6 +1,7 @@
 import {create} from 'zustand';
 import type {ScopeModelId} from './settingsStore';
 import type {TransportType} from '../services/connection/types';
+import type {DriverId} from '../services/protocol/driver';
 
 export type ConnStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
 /** État de la synchronisation temps réel raquette virtuelle ↔ physique.
@@ -27,6 +28,9 @@ interface ScopeState {
   connStatus: ConnStatus;
   transportType: TransportType | null;
   model: ScopeModelId | null;
+  /** Protocole détecté/choisi (v2.6.0) — pilote l'adaptation des écrans
+   *  (fonctionnalités Meade masquées, libellés, cartes monture). */
+  driverId: DriverId | null;
   /** Firmware détecté à la connexion (:GVP#/:GVN#) — pilote le mappage du clavier. */
   fwProduct: string | null;
   fwVersion: string | null;
@@ -69,6 +73,7 @@ interface ScopeState {
   setConnStatus: (s: ConnStatus) => void;
   setTransportType: (t: TransportType | null) => void;
   setModel: (m: ScopeModelId | null) => void;
+  setDriverId: (d: DriverId | null) => void;
   setFirmware: (product: string | null, version: string | null, model: ScopeModelId | null) => void;
   setPosition: (raDeg: number, decDeg: number) => void;
   setHasPos: (v: boolean) => void;
@@ -95,6 +100,7 @@ const initial = {
   connStatus: 'disconnected' as ConnStatus,
   transportType: null,
   model: null,
+  driverId: null as DriverId | null,
   fwProduct: null as string | null,
   fwVersion: null as string | null,
   fwModel: null as ScopeModelId | null,
@@ -127,6 +133,7 @@ export const useScopeStore = create<ScopeState>((set) => ({
   setConnStatus: (connStatus) => set({connStatus}),
   setTransportType: (transportType) => set({transportType}),
   setModel: (model) => set({model}),
+  setDriverId: (driverId) => set({driverId}),
   setFirmware: (fwProduct, fwVersion, fwModel) => set({fwProduct, fwVersion, fwModel}),
   setPosition: (raDeg, decDeg) => set({raDeg, decDeg, hasPos: true}),
   setHasPos: (hasPos) => set({hasPos}),

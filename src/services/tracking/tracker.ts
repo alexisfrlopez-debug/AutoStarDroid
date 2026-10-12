@@ -36,8 +36,8 @@ import {
   type PulseDir,
   type PulseSigns,
 } from '../astro/tracking';
+import {sleep} from '../util';
 
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 const TICK_MS = 1500;
 const DEADBAND_ARCMIN = 2;

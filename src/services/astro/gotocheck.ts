@@ -23,6 +23,8 @@
  * 100 % pur TypeScript, aucune dépendance RN — testable sous Jest.
  */
 
+import {R2D} from './telemetry';
+
 export interface TeleSample {
   /** Horodatage (ms). */
   t: number;
@@ -41,7 +43,6 @@ export interface GyroLite {
   z: number;
 }
 
-const R2D = 180 / Math.PI;
 
 /** Distance de rotation entre deux quaternions (deg) — 2·acos(|q1·q2|). */
 export function quatAngleDeg(

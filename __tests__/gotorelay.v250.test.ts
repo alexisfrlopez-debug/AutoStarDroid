@@ -7,7 +7,6 @@
 import {
   RELAY_TOLERANCE_DEG,
   RELAY_SLOW_AT_DEG,
-  RELAY_FINE_AT_DEG,
   raDeltaDeg,
   relayRemainders,
   relaySpeedFor,
@@ -54,7 +53,6 @@ describe('relayRemainders / relaySpeedFor — paliers', () => {
     expect(relaySpeedFor(RELAY_SLOW_AT_DEG)).toBe('slew');
     expect(relaySpeedFor(2.4)).toBe('center');
     expect(relaySpeedFor(0.1)).toBe('center');
-    expect(relaySpeedFor(RELAY_FINE_AT_DEG)).toBe('center');
   });
 });
 
