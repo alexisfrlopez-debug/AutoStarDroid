@@ -24,8 +24,12 @@ import {useSettingsStore} from '../store/settingsStore';
 import {useCameraStore} from '../store/cameraStore';
 import {useScopeStore} from '../store/scopeStore';
 import {
-  astroCamera, type CameraRanges, type ManualParams, type OpenOpts,
+  astroCamera, type CameraDeviceInfo, type CameraRanges, type ManualParams, type OpenOpts,
 } from '../services/phone/astroCamera';
+import {
+  deviceLabel, splitByType, coerceType, selectionValid,
+  type CamType, type CamRoleLabels,
+} from '../services/astro/cameraPicker';
 import {
   acquisitionRunner, buildPlan, captureCalibFrames,
   type AcqKind, type AcqQuality, type AcqProgress,
@@ -480,6 +484,8 @@ export function CameraScreen() {
   const [calibMsg, setCalibMsg] = useState<string | null>(null);
   const [kind, setKind] = useState<AcqKind>('moon');
   const [quality, setQuality] = useState<AcqQuality>('standard');
+  /** Type de caméra affiché (v2.8.1 — « interne ou externe » + dropdown). */
+  const [camType, setCamType] = useState<CamType>('external');
 
   const plan = buildPlan(
     kind, quality,
@@ -527,14 +533,61 @@ export function CameraScreen() {
   const refreshDevices = async () => {
     setBusy(true);
     const devs = await astroCamera.listCameras();
-    cam.setDevices(devs.map((d) => ({id: d.id, label: d.label, external: d.external, manual: d.manual})));
-    if (devs.length && cam.cameraId === null) {
-      cam.setCameraId(devs.find((d) => d.external)?.id ?? devs[0].id);
+    cam.setDevices(devs.map((d) => ({
+      id: d.id, label: d.label, external: d.external, manual: d.manual,
+      role: d.role, facing: d.facing,
+    })));
+    // défaut : externe (UVC) dès qu'elle existe — sinon interne ; si le
+    // choix courant est hors du type affiché, revenir au premier du type
+    setCamType((prev) => coerceType(prev, devs));
+    if (devs.length) {
+      const {internal, external} = splitByType(devs);
+      const shown = camType === 'external' ? external : internal;
+      if (!selectionValid(cam.cameraId, shown) || cam.cameraId === null) {
+        const fallbackType = coerceType(camType, devs);
+        const pool = fallbackType === 'external' ? external : internal;
+        cam.setCameraId(pool[0]?.id ?? devs[0].id);
+      }
     }
     setBusy(false);
   };
 
   useEffect(() => {void refreshDevices(); /* eslint-disable-next-line react-hooks/exhaustive-deps */}, []);
+
+  /** Changement de caméra : le flux (et la négociation UVC) repart à zéro. */
+  const switchCamera = (id: string) => {
+    if (id === cam.cameraId) return;
+    if (cam.streaming) void stopStream();
+    cam.setUvcSelection(null, null, null);
+    cam.setCameraId(id);
+  };
+
+  /** Libellés de rôle traduits (le natif ne renvoie que des codes). */
+  const roleLabels: CamRoleLabels = {
+    rear: t.cam.roleRear, front: t.cam.roleFront, main: t.cam.roleMain,
+    wide: t.cam.roleWide, tele: t.cam.roleTele, depth: t.cam.roleDepth,
+    external: t.cam.roleExternal,
+  };
+
+  const camLists = splitByType(cam.devices as unknown as CameraDeviceInfo[]);
+  const activeType: CamType = camType === 'external' && camLists.external.length === 0
+    ? 'internal' : (camType === 'internal' && camLists.internal.length === 0
+      ? 'external' : camType);
+  const shownDevices = activeType === 'external' ? camLists.external : camLists.internal;
+  const shownId = selectionValid(cam.cameraId, shownDevices) ? cam.cameraId
+    : (shownDevices[0]?.id ?? null);
+  const camOptions = shownDevices.map((d) => ({
+    key: d.id,
+    label: deviceLabel(d, roleLabels),
+    hint: !d.manual ? t.cam.noManualHint : undefined,
+  }));
+
+  // le choix actif suit toujours la liste affichée (évite d'ouvrir une
+  // caméra hors type au tap sur Démarrer)
+  useEffect(() => {
+    if (shownId && cam.cameraId !== shownId) cam.setCameraId(shownId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shownId]);
 
   const startStream = async () => {
     if (!cam.cameraId) return;
@@ -644,25 +697,30 @@ export function CameraScreen() {
 
       {/* ---------- CAMÉRA + FLUX ---------- */}
       <Card>
-        <Title text={t.cam.title} />
+        <View style={[s.row, s.between, {marginBottom: 4}]}>
+          <Title text={t.cam.title} />
+          <TouchableOpacity onPress={() => void refreshDevices()}>
+            <Text style={{color: c.blue, fontSize: 11, fontWeight: '700'}}>{t.cam.refresh}</Text>
+          </TouchableOpacity>
+        </View>
         {cam.devices.length === 0 ? (
-          <View>
-            <Text style={{color: c.textDim, fontSize: 12, marginBottom: 8}}>{t.cam.noCamera}</Text>
-            <Btn label={t.cam.refresh} onPress={() => void refreshDevices()} />
-          </View>
+          <Text style={{color: c.textDim, fontSize: 12, marginBottom: 4}}>{t.cam.noCamera}</Text>
         ) : (
           <View>
-            {cam.devices.map((d) => (
-              <TouchableOpacity key={d.id} onPress={() => cam.setCameraId(d.id)}
-                style={{
-                  paddingVertical: 8, paddingHorizontal: 10, borderRadius: 8, marginBottom: 4,
-                  backgroundColor: d.id === cam.cameraId ? c.btnActive : c.bgPanel2,
-                  flexDirection: 'row', justifyContent: 'space-between',
-                }}>
-                <Text style={{color: d.id === cam.cameraId ? c.amber : c.text, fontSize: 13}}>{d.label}</Text>
-                <Text style={{color: c.textFaint, fontSize: 11}}>{d.external ? 'UVC' : 'int.'}</Text>
-              </TouchableOpacity>
-            ))}
+            {/* TYPE — interne (arrière / avant / grand-angle / profondeur-IR)
+                ou externe (UVC USB-host) — v2.8.1 */}
+            <Segmented<CamType>
+              value={activeType}
+              onChange={(v) => setCamType(v)}
+              options={[
+                {key: 'internal', label: t.cam.camTypeInternal},
+                {key: 'external', label: t.cam.camTypeExternal},
+              ]}
+            />
+            {/* MENU DÉROULANT — TOUTES les caméras du type choisi, avec
+                leur rôle (front/rear/grand-angle/IR selon le téléphone) */}
+            <Dropdown label={t.cam.camSelect} value={shownId}
+              options={camOptions} onChange={(k) => switchCamera(k)} />
           </View>
         )}
         {cam.streaming ? (

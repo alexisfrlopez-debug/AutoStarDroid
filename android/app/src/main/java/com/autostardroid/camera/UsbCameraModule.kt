@@ -100,17 +100,22 @@ class UsbCameraModule(reactContext: ReactApplicationContext) :
   fun listCameras(promise: Promise) {
     try {
       val mgr = cameraManager ?: return promise.reject("CAM", "CameraManager indisponible")
-      val arr = Arguments.createArray()
+      // PASSE 1 — collecte : id, facing, focale, capacité DEPTH (profondeur/
+      // IR), tailles YUV. (v2.8.1 — « menu déroulant : front/rear/grand
+      // angle/IR etc. selon les options du téléphone » : on liste TOUTES
+      // les caméras, l'avant aussi, avec leur RÔLE.)
+      class Info(
+        val id: String, val facing: Int, val focal: Float,
+        val depth: Boolean, val manual: Boolean, val sizes: List<String>,
+        val maxIso: Int, val minEv: Int, val maxEv: Int,
+      )
+      val infos = ArrayList<Info>()
       for (id in mgr.cameraIdList) {
         try {
           val ch = mgr.getCameraCharacteristics(id)
-          val facing = ch.get(CameraCharacteristics.LENS_FACING)
-          val isExternal = facing == CameraCharacteristics.LENS_FACING_EXTERNAL
-          val isBack = facing == CameraCharacteristics.LENS_FACING_BACK
-          if (!isExternal && !isBack) continue // selfie avant : inutile
+          val facing = ch.get(CameraCharacteristics.LENS_FACING) ?: continue
           val map = ch.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: continue
           val sizes = map.getOutputSizes(ImageFormat.YUV_420_888) ?: continue
-          // trois tailles utiles : la plus petite, une moyenne, la plus grande
           val sorted = sizes.sortedBy { it.width * it.height }
           val picked = sorted.filterIndexed { i, _ -> i == 0 || i == sorted.size / 2 || i == sorted.size - 1 }
               .map { "${it.width}x${it.height}" }
@@ -120,18 +125,47 @@ class UsbCameraModule(reactContext: ReactApplicationContext) :
               lvl == CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_FULL
           val aeRange = ch.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
           val sensRange = ch.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
-          arr.pushMap(Arguments.createMap().apply {
-            putString("id", id)
-            putString("facing", if (isExternal) "external" else "back")
-            putBoolean("external", isExternal)
-            putBoolean("manual", manual)
-            putArray("sizes", Arguments.createArray().apply { picked.forEach { pushString(it) } })
-            putInt("maxIso", sensRange?.upper ?: 0)
-            putInt("minExposureComp", aeRange?.lower ?: 0)
-            putInt("maxExposureComp", aeRange?.upper ?: 0)
-            putString("label", if (isExternal) "Caméra externe #$id" else "Caméra interne #$id")
-          })
+          val focal = ch.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+              ?.minOrNull() ?: 0f
+          val depth = ch.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)
+              ?.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_DEPTH_OUTPUT) == true
+          infos.add(Info(id, facing, focal, depth, manual, picked,
+              sensRange?.upper ?: 0, aeRange?.lower ?: 0, aeRange?.upper ?: 0))
         } catch (_: Exception) { /* caractéristiques illisibles : caméra suivante */ }
+      }
+      // PASSE 2 — rôles : parmi les caméras ARRIÈRE (hors profondeur), la
+      // plus courte focale = grand-angle, la plus longue = téléobjectif
+      // (si ≥ 2), les autres = principale. Avant = frontale.
+      val backs = infos.filter { it.facing == CameraCharacteristics.LENS_FACING_BACK && !it.depth }
+      val minF = backs.minOfOrNull { it.focal } ?: 0f
+      val maxF = backs.maxOfOrNull { it.focal } ?: 0f
+      val arr = Arguments.createArray()
+      for (info in infos) {
+        val isExternal = info.facing == CameraCharacteristics.LENS_FACING_EXTERNAL
+        val isBack = info.facing == CameraCharacteristics.LENS_FACING_BACK
+        val facingStr = if (isExternal) "external" else if (isBack) "back" else "front"
+        val role = when {
+          info.depth -> "depth"
+          isExternal -> "external"
+          !isBack -> "main"
+          backs.size <= 1 -> "main"
+          info.focal <= minF + 0.01f -> "wide"
+          info.focal >= maxF - 0.01f && info.focal > minF + 0.01f -> "tele"
+          else -> "main"
+        }
+        arr.pushMap(Arguments.createMap().apply {
+          putString("id", info.id)
+          putString("facing", facingStr)
+          putBoolean("external", isExternal)
+          putBoolean("manual", info.manual)
+          putArray("sizes", Arguments.createArray().apply { info.sizes.forEach { pushString(it) } })
+          putInt("maxIso", info.maxIso)
+          putInt("minExposureComp", info.minEv)
+          putInt("maxExposureComp", info.maxEv)
+          putString("role", role)
+          putDouble("focal", info.focal.toDouble())
+          putString("label", "Caméra #${info.id}")
+        })
       }
       promise.resolve(arr)
     } catch (e: Exception) {

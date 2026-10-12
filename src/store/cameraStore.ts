@@ -13,7 +13,13 @@ import type {AcqProgress, AcqResult} from '../services/astro/acquisition';
 import type {GuidingState} from '../services/astro/guiding';
 
 interface CameraState {
-  devices: Array<{id: string; label: string; external: boolean; manual: boolean}>;
+  devices: Array<{
+    id: string; label: string; external: boolean; manual: boolean;
+    /** Rôle du capteur (v2.8.1) : wide | main | tele | depth | external. */
+    role: string;
+    /** Position : external / back / front (v2.8.1 — menu interne/externe). */
+    facing: 'external' | 'back' | 'front';
+  }>;
   cameraId: string | null;
   streaming: boolean;
   /** Dernier frame (aperçu — rafraîchi par le composant, pas stocké en gros). */

@@ -15,8 +15,10 @@ import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
+import android.hardware.usb.UsbRequest
 import android.os.Handler
 import android.os.HandlerThread
+import java.nio.ByteBuffer
 import android.util.Base64
 import androidx.core.content.ContextCompat
 import com.facebook.react.bridge.Arguments
@@ -46,13 +48,17 @@ import org.json.JSONObject
  *    de traitement, formats MJPEG/UNCOMPRESSED, frames + intervalles,
  *    alternate settings ;
  *  - FLUX : négociation UVC (PROBE/COMMIT — préremplie par GET_CUR),
- *    CLEAR_FEATURE(ENDPOINT_HALT) avant lecture, lecture BULK en boucle
- *    PAR TRANCHES ≤ 16 Ko (limite bulkTransfer Android) et RÉASSEMBLAGE
- *    des frames par bascule FID + marqueur JPEG EOI (v2.8.0 — la v2.7.0
- *    confondait le bit EOH (fin d'EN-TÊTE) avec une fin de FRAME : chaque
- *    paquet émettait un fragment JPEG incomplet → aucun flux visible),
- *    frames JPEG émises vers le JS (événement 'cameraFrame', MÊME format
- *    que Camera2 — l'aperçu/l'autoguidage/l'acquisition fonctionnent sans
+ *    transport BULK (caméras astro — lecture synchrone par tranches ≤ 16 Ko)
+ *    ou ISOCHRONOUS (webcams grand public : Logitech, ELP… — anneau de
+ *    UsbRequest + setIsochronousPackets, API 31+ ; v2.8.1 — la v2.7/2.8
+ *    visait l'alternate setting 0 de l'interface VS, qui n'a JAMAIS
+ *    d'endpoint : « cette caméra n'expose pas d'endpoint » ; SET_INTERFACE
+ *    explicite sur l'alt porteur, échelle de repli de bande passante),
+ *    CLEAR_FEATURE(ENDPOINT_HALT) avant lecture BULK, RÉASSEMBLAGE des
+ *    frames par bascule FID + marqueur JPEG EOI + troncature exacte
+ *    dwMaxVideoFrameSize (v2.8.0 : la v2.7.0 confondait le bit EOH (fin
+ *    d'EN-TÊTE) avec une fin de FRAME), frames JPEG émises vers le JS
+ *    (événement 'cameraFrame', MÊME format que Camera2 — l'aperçu/l'autoguidage/l'acquisition fonctionnent sans
  *    changement) ; luminance réduite 192×144 + centroïde (verrou de
  *    suivi) calculés CÔTÉ NATIF comme pour Camera2 ;
  *  - CONTRÔLES : requêtes UVC (exposition auto/absolue, gain, luminosité,
@@ -60,10 +66,9 @@ import org.json.JSONObject
  *    zoom, focus auto/absolu) avec plages lues GET_MIN/GET_MAX/GET_RES/
  *    GET_DEF — alimente les curseurs de réglage manuel côté JS.
  *
- * LIMITES assumées : ISOCHRONOUS non exposé par l'API Android SDK (bulk
- * seul) — la très grande majorité des caméras astronomiques UVC (SVBONY,
- * ZWO, QHY, ELP…) négocient un endpoint BULK ; un appareil ISO-only
- * reçoit une erreur claire.
+ * LIMITES assumées : ISOCHRONOUS géré depuis la v2.8.1 via UsbRequest
+ * (API 31+ — Android 12 ; le téléphone cible est en Android 15). Les
+ * caméras ISO-only sur Android < 12 reçoivent une erreur claire.
  *
  * ⚠️ Règle de survie Hermes (v1.7.2) : TOUTES les méthodes sont basées sur
  * Promise, AUCUN callback JS ne traverse le pont — résultats par Promise
@@ -83,6 +88,9 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
     private const val LUMA_H = 144
     /** Octets de la structure PROBE/COMMIT demandés si GET_LEN échoue. */
     private const val PROBE_LEN_FALLBACK = 26
+    /** ISO — microtrames par requête et requêtes en vol (anneau). */
+    private const val ISO_PACKETS_PER_REQ = 32
+    private const val ISO_REQ_COUNT = 8
 
     // Descripteurs UVC (types / sous-types)
     private const val DT_INTERFACE = 0x04
@@ -115,9 +123,18 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
   private var connection: UsbDeviceConnection? = null
   private var vsInterface: UsbInterface? = null
   private var bulkEp: UsbEndpoint? = null
+  /** ISO : requêtes + buffers d'anneau (UsbRequest — API 31+). */
+  private var isoRequests: List<UsbRequest>? = null
   private var frameW = 0
   private var frameH = 0
   private var isMjpeg = true
+  /** Taille attendue d'une frame UNCOMPRESSED (dwMaxVideoFrameSize) —
+   *  troncature exacte du réassemblage (protège des zéros de bourrage). */
+  private var expectedFrame = 0
+  /** Réassemblage partagé bulk/ISO — l'accumulateur de frame courante. */
+  private var acc = ByteArray(0)
+  private var accLen = 0
+  private var lastFid = -1
   private var frameSkip = 1
   private var frameCount = 0L
   private var jpegQuality = 75
@@ -247,12 +264,22 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
       val index: Int, val mjpeg: Boolean,
       val frames: MutableList<UvcFrame> = ArrayList())
 
+  /** Endpoint IN de l'interface VS (descripteurs bruts). alt = alternate
+   *  setting porteur — alt 0 n'a JAMAIS d'endpoint (zéro bande passante).
+   *  rawMaxPacket = wMaxPacketSize BRUT du descripteur ; maxPacket = taille
+   *  réelle (raw & 0x7FF × multiplicateur haut-débit bits 11-12 pour ISO). */
+  private class VsEp(val alt: Int, val addr: Int, val bulk: Boolean, val rawMaxPacket: Int) {
+    val maxPacket: Int = if (bulk) rawMaxPacket
+    else (rawMaxPacket and 0x7FF) * (((rawMaxPacket shr 11) and 0x3) + 1)
+  }
+
   private class UvcDesc {
     var vcIfNum = -1
     var puId = 0
     var ctId = 0
     var vsIfNum = -1
     val formats = ArrayList<UvcFormat>()
+    val vsEps = ArrayList<VsEp>()
   }
 
   private fun parseDescriptors(conn: UsbDeviceConnection): UvcDesc {
@@ -260,6 +287,7 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
     val out = UvcDesc()
     var curIfNum = -1
     var curIfSub = -1
+    var curIfAlt = 0
     var curFormat: UvcFormat? = null
     var i = 0
     while (i < d.size) {
@@ -269,9 +297,10 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
       when (type) {
         DT_INTERFACE -> {
           val num = d[i + 2].toInt() and 0xFF
+          val alt = d[i + 3].toInt() and 0xFF
           val cls = d[i + 5].toInt() and 0xFF
           val sub = d[i + 6].toInt() and 0xFF
-          curIfNum = num; curIfSub = sub
+          curIfNum = num; curIfSub = sub; curIfAlt = alt
           if (cls == UsbConstants.USB_CLASS_VIDEO && sub == SC_VIDEOCONTROL &&
               out.vcIfNum < 0) {
             out.vcIfNum = num
@@ -326,6 +355,16 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
                 f.frames.add(UvcFrame(idx, w, h, intervals.toIntArray()))
               }
             }
+          }
+        }
+        DT_ENDPOINT -> if (curIfSub == SC_VIDEOSTREAMING && i + 6 <= d.size) {
+          // endpoints de l'interface VS courante — IN bulk (astronomiques)
+          // ou IN isochrone (webcams grand public : Logitech, ELP…)
+          val addr = d[i + 2].toInt() and 0xFF
+          val attr = d[i + 3].toInt() and 0x03
+          val raw = (d[i + 4].toInt() and 0xFF) or ((d[i + 5].toInt() and 0xFF) shl 8)
+          if ((addr and 0x80) != 0 && (attr == 0x02 || attr == 0x00)) {
+            out.vsEps.add(VsEp(curIfAlt, addr, attr == 0x02, raw))
           }
         }
       }
@@ -439,34 +478,26 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
           ?: frame.intervals.minByOrNull { Math.abs(it - wantInt) }
           ?: frame.intervals.minOrNull() ?: 10_000_000
 
-      // interface VS + endpoint bulk IN
-      var vsIf: UsbInterface? = null
-      for (k in 0 until dev.interfaceCount) {
-        val f = dev.getInterface(k)
-        if (f.id == vsIfNum) { vsIf = f; break }
-      }
-      vsIf ?: run { conn.close(); return promise.reject("UVC", "Interface VS $vsIfNum introuvable") }
-      var ep: UsbEndpoint? = null
-      for (k in 0 until vsIf.endpointCount) {
-        val e = vsIf.getEndpoint(k)
-        if (e.direction == UsbConstants.USB_DIR_IN &&
-            e.type == UsbConstants.USB_ENDPOINT_XFER_BULK) { ep = e; break }
-      }
-      ep ?: run { conn.close(); return promise.reject(
-          "ISO", "Cette caméra n'expose pas d'endpoint BULK (ISO non géré par l'API Android)") }
-
-      if (!conn.claimInterface(vsIf, true)) {
+      // TRANSPORT — scan des endpoints VS depuis les DESCRIPTEURS BRUTS.
+      // ⚠️ CAUSE DE « cette caméra n'expose pas d'endpoint » (v2.7/v2.8) :
+      // l'alternate setting 0 de l'interface VS n'a JAMAIS d'endpoint
+      // (zéro bande passante) et dev.interfaceCount liste TOUTES les
+      // variantes — le 1er UsbInterface correspondant était donc alt 0.
+      // BULK privilégié (caméras astronomiques) ; ISO sinon (webcams grand
+      // public : Logitech, ELP…) via UsbRequest.setIsochronousPackets
+      // (API 31+ — le téléphone cible est en Android 15).
+      val bulkEpDesc = desc.vsEps.firstOrNull { it.bulk }
+      val isoEpDescs = desc.vsEps.filterNot { it.bulk }.sortedBy { it.maxPacket }
+      if (bulkEpDesc == null && isoEpDescs.isEmpty()) {
         conn.close()
-        return promise.reject("UVC", "Claim interface VS échoué")
+        return promise.reject("UVC",
+            "Aucun endpoint VideoStreaming IN — descripteurs UVC non conformes")
       }
+      val isoMode = bulkEpDesc == null
 
-      // CLEAR_FEATURE(ENDPOINT_HALT) : débloque un endpoint resté coincé
-      // par une session précédente (même précaution que libusb)
-      try { conn.controlTransfer(0x02, 0x01, 0, ep.address, null, 0, 200) } catch (_: Exception) {}
-
-      // négociation PROBE/COMMIT — on PART de la négociation courante
-      // (GET_CUR préremplit dwMaxVideoFrameSize/payload et les champs
-      // version : certains firmwares refusent une structure tout-zéro)
+      // négociation PROBE — on PART de la négociation courante (GET_CUR
+      // préremplit dwMaxVideoFrameSize/payload et les champs version :
+      // certains firmwares refusent une structure tout-zéro)
       val probeLen = ctrlGetLen(conn)
       val probe = (ctrlGetVs(conn, CS_PROBE, 0x81, probeLen) ?: ByteArray(probeLen)).copyOf()
       probe[2] = format.index.toByte()
@@ -477,9 +508,103 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
       }
       val got = ctrlGetVs(conn, CS_PROBE, 0x81, probeLen)
           ?: run { conn.close(); return promise.reject("UVC", "PROBE GET_CUR échoué") }
-      val maxFrameBytes = le32(got, 20)
-      val maxPayload = le32(got, 24)
+      // ⚠️ offsets VS_PROBE_CONTROL : dwMaxVideoFrameSize à 18,
+      // dwMaxPayloadTransferSize à 22 (v2.8.0 lisait 20/24 — décalés)
+      val maxFrameBytes = le32(got, 18)
+      val maxPayload = le32(got, 22)
       val commit = got.copyOf()
+
+      // interface + endpoint + alternate setting porteur
+      var vsIf: UsbInterface? = null
+      var ep: UsbEndpoint? = null
+      var chosenRawPacket = 0
+      var chosenActualPacket = 0
+      if (bulkEpDesc != null) {
+        val bd = bulkEpDesc
+        for (k in 0 until dev.interfaceCount) {
+          val f = dev.getInterface(k)
+          if (f.id == vsIfNum && f.alternateSetting == bd.alt) { vsIf = f; break }
+        }
+        vsIf ?: run {
+          conn.close()
+          return promise.reject("UVC", "Interface VS alt ${bd.alt} introuvable")
+        }
+        for (j in 0 until vsIf.endpointCount) {
+          val e = vsIf.getEndpoint(j)
+          if (e.direction == UsbConstants.USB_DIR_IN &&
+              e.type == UsbConstants.USB_ENDPOINT_XFER_BULK) { ep = e; break }
+        }
+        ep ?: run {
+          conn.close()
+          return promise.reject("UVC", "Endpoint BULK introuvable sur alt ${bd.alt}")
+        }
+        if (!conn.claimInterface(vsIf, true)) {
+          conn.close()
+          return promise.reject("UVC", "Claim interface VS échoué")
+        }
+        // ACTIVE l'alternate setting porteur de l'endpoint — sans cela le
+        // périphérique reste à alt 0 et chaque bulkTransfer échoue
+        if (!setAltSetting(conn, vsIfNum, bd.alt)) {
+          conn.close()
+          return promise.reject("UVC", "SET_INTERFACE(${bd.alt}) refusé")
+        }
+        // CLEAR_FEATURE(ENDPOINT_HALT) : débloque un endpoint resté coincé
+        // par une session précédente (même précaution que libusb)
+        try { conn.controlTransfer(0x02, 0x01, 0, ep.address, null, 0, 200) } catch (_: Exception) {}
+      } else {
+        // ISO — SDK public : UsbRequest.queue() coupe le buffer en tranches
+        // wMaxPacketSize BRUT (libusbhost) ; le haut-débit (mult > 1) n'est
+        // pas exploitable de façon fiable → besoin plafonné à 1024 octets
+        // par microframe, alt SANS multiplicateur (raw == réel) privilégié.
+        val fps = (10_000_000.0 / intervalVal).coerceIn(1.0, 120.0)
+        val need = if (maxPayload > 0) maxPayload else {
+          val rawBytes = if (maxFrameBytes > 0) maxFrameBytes else frame.w * frame.h * 2
+          val comp = if (format.mjpeg) 8.0 else 1.0
+          (rawBytes / comp * fps / 8000.0 * 1.2).toInt().coerceAtLeast(128)
+        }
+        val needCapped = minOf(need, 1024)
+        val cand = isoEpDescs.firstOrNull { it.maxPacket >= needCapped && it.rawMaxPacket == it.maxPacket }
+            ?: isoEpDescs.firstOrNull { it.maxPacket >= needCapped }
+            ?: isoEpDescs.last() // aucune tranche simple : la plus large bande
+        // échelle de repli : candidat → plus petits (moins de bande :
+        // SET_INTERFACE réussit, frames partielles possibles) → plus grands
+        val ladder = (listOf(cand)
+            + isoEpDescs.filter { it !== cand && it.maxPacket <= cand.maxPacket }
+                .sortedByDescending { it.maxPacket }
+            + isoEpDescs.filter { it !== cand && it.maxPacket > cand.maxPacket }
+                .sortedByDescending { it.maxPacket }).distinctBy { it.alt }
+        var altErr: String? = null
+        for (cd in ladder) {
+          var f: UsbInterface? = null
+          for (k in 0 until dev.interfaceCount) {
+            val itf = dev.getInterface(k)
+            if (itf.id == vsIfNum && itf.alternateSetting == cd.alt) { f = itf; break }
+          }
+          f ?: continue
+          if (!conn.claimInterface(f, true)) { altErr = "claim alt ${cd.alt}"; continue }
+          if (!setAltSetting(conn, vsIfNum, cd.alt)) { altErr = "SET_INTERFACE(${cd.alt})"; continue }
+          var e2: UsbEndpoint? = null
+          for (j in 0 until f.endpointCount) {
+            val e = f.getEndpoint(j)
+            if (e.direction == UsbConstants.USB_DIR_IN &&
+                e.type == UsbConstants.USB_ENDPOINT_XFER_ISOC) { e2 = e; break }
+          }
+          e2 ?: continue
+          vsIf = f; ep = e2
+          chosenRawPacket = cd.rawMaxPacket
+          chosenActualPacket = cd.maxPacket
+          altErr = null
+          break
+        }
+        if (vsIf == null || ep == null) {
+          conn.close()
+          return promise.reject("ISO",
+              "Allocation USB impossible (${altErr ?: "aucun alternate setting"})")
+        }
+        // la caméra doit connaître la bande allouée par l'hôte
+        if (maxPayload <= 0) putLe32(commit, 22, chosenActualPacket)
+      }
+
       if (!ctrlSetVs(conn, CS_COMMIT, commit)) {
         conn.close(); return promise.reject("UVC", "COMMIT refusé par la caméra")
       }
@@ -490,25 +615,52 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
       bulkEp = ep
       frameW = frame.w; frameH = frame.h
       isMjpeg = format.mjpeg
+      expectedFrame = if (!isMjpeg && maxFrameBytes in 1..(32 * 1024 * 1024)) maxFrameBytes else 0
       jpegQuality = quality.coerceIn(40, 95)
       frameSkip = if (fpsMax >= 30) 1 else maxOf(1, 30 / maxOf(1, fpsMax))
       frameCount = 0
+      val cap = if (maxFrameBytes in 1..(32 * 1024 * 1024)) maxFrameBytes else frame.w * frame.h * 2
+      acc = ByteArray(maxOf(cap, 96 * 1024))
+      accLen = 0
+      lastFid = -1
       streaming = true
       synchronized(lumaRing) { lumaRing.clear() }
 
       thread = HandlerThread("autostar-uvc").apply { start() }
       handler = Handler(thread!!.looper)
-      // ⚠️ UsbDeviceConnection.bulkTransfer est plafonné à 16384 octets par
-      // appel — au-delà chaque transfert échoue (v2.7.0 : bufSize = maxPayload
-      // pouvait dépasser → aucun flux). Les GRANDES frames sont réassemblées
-      // par la boucle de lecture (accumulateur).
-      val bufSize = maxPayload.coerceIn(1024, 16_384)
-      val payloadCap = if (maxFrameBytes > 0) maxFrameBytes else frame.w * frame.h * 2
-      val t = Thread {
-        bulkReadLoop(conn, ep, bufSize, payloadCap)
+      if (isoMode) {
+        // ISO : anneau de UsbRequest — le buffer est coupé automatiquement
+        // en tranches chosenRawPacket par microframe (libusbhost) ;
+        // complétion via requestWait() (FIFO — le même anneau tourne).
+        // 32 tranches par requête, 8 requêtes en vol ≈ 32 ms de marge.
+        val reqs = ArrayList<UsbRequest>(ISO_REQ_COUNT)
+        val bufs = HashMap<UsbRequest, ByteBuffer>(ISO_REQ_COUNT)
+        try {
+          for (i in 0 until ISO_REQ_COUNT) {
+            val r = UsbRequest()
+            if (!r.initialize(conn, ep)) throw IllegalStateException("UsbRequest init échoué")
+            val b = ByteBuffer.allocateDirect(chosenRawPacket * ISO_PACKETS_PER_REQ)
+            if (!r.queue(b)) throw IllegalStateException("File ISO refusée")
+            reqs.add(r); bufs[r] = b
+          }
+        } catch (e: Exception) {
+          for (r in reqs) { try { r.cancel() } catch (_: Exception) {}; try { r.close() } catch (_: Exception) {} }
+          closeLocked()
+          return promise.reject("ISO", e.message ?: "Flux ISO impossible", e)
+        }
+        isoRequests = reqs
+        val t = Thread { isoReadLoop(conn, reqs, bufs, chosenRawPacket) }
+        readThread = t
+        t.start()
+      } else {
+        // ⚠️ UsbDeviceConnection.bulkTransfer est plafonné à 16384 octets
+        // par appel — au-delà chaque transfert échoue (v2.7.0 : bufSize =
+        // maxPayload pouvait dépasser → aucun flux). Les GRANDES frames
+        // sont réassemblées par la boucle (accumulateur partagé).
+        val t = Thread { bulkReadLoop(conn, ep, 16_384) }
+        readThread = t
+        t.start()
       }
-      readThread = t
-      t.start()
       promise.resolve(true)
     } catch (e: Exception) {
       closeLocked()
@@ -534,25 +686,82 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
     b[off + 3] = ((v shr 24) and 0xFF).toByte()
   }
 
+  /** SET_INTERFACE — active l'alternate setting (alloue la bande passante
+   *  ISO / expose l'endpoint bulk). Absent de l'API SDK : requête de
+   *  contrôle USB standard (bmRequestType 0x01, bRequest 0x0B). */
+  private fun setAltSetting(conn: UsbDeviceConnection, ifNum: Int, alt: Int): Boolean {
+    return try {
+      conn.controlTransfer(0x01, 0x0B, alt, ifNum and 0xFF, null, 0, 300) >= 0
+    } catch (_: Exception) { false }
+  }
+
+  private fun allZeros(b: ByteArray, from: Int, to: Int): Boolean {
+    var k = from
+    while (k < to) { if (b[k].toInt() != 0) return false; k += 1 }
+    return true
+  }
+
   /**
-   * Boucle de lecture BULK — CORRECT v2.8.0 : les paquets UVC sont des
-   * FRAGMENTS de frame (16 Ko max par bulkTransfer), la frame complète est
-   * réassemblée dans un accumulateur. Frontières de frame :
-   *  - bascule du bit FID (bmHeaderInfo bit 0 — identifiant de frame qui
-   *    s'inverse à chaque nouvelle frame) → la frame précédente est finie ;
+   * Réassemblage PARTAGÉ bulk/ISO — ingest d'UN paquet UVC (en-tête +
+   * payload) : les paquets UVC sont des FRAGMENTS de frame, la frame
+   * complète est réassemblée dans l'accumulateur (acc/accLen/lastFid).
+   * Frontières de frame :
+   *  - bascule du bit FID (bmHeaderInfo bit 0 — s'inverse à chaque frame)
+   *    → la frame précédente est complète ;
    *  - pour MJPEG : marqueur EOI (FF D9) en fin de payload — émission
-   *    immédiate, sans attendre le paquet suivant (certaines caméras ne
-   *    basculent FID qu'au premier paquet de la frame SUIVANTE).
+   *    immédiate (certaines caméras ne basculent FID qu'au paquet suivant) ;
+   *  - pour UNCOMPRESSED : taille exacte dwMaxVideoFrameSize — troncature
+   *    qui neutralise les zéros de bourrage ISO en fin de frame.
    * bit 5 (0x20) = ERR → frame à jeter. NB : le bit 6 (0x40) est EOH (fin
    * d'EN-TÊTE, pas fin de frame) — la v2.7.0 le prenait pour une fin de
    * frame et émettait chaque paquet comme une « frame » JPEG incomplète
    * (décodage impossible → AUCUN flux visible).
    */
-  private fun bulkReadLoop(conn: UsbDeviceConnection, ep: UsbEndpoint, bufSize: Int, payloadCap: Int) {
+  private fun ingestPacket(buf: ByteArray, off: Int, end: Int) {
+    if (end - off < 2) return
+    val hlen = buf[off].toInt() and 0xFF
+    if (hlen < 2 || off + hlen > end) return // en-tête invalide : paquet jeté
+    val hdr = buf[off + 1].toInt() and 0xFF
+    val fid = hdr and 0x01            // Frame Identifier (bascule par frame)
+    val err = (hdr and 0x20) != 0     // ERR : frame corrompue → jetée
+    val plen = end - (off + hlen)
+    if (err) { accLen = 0; return }
+    if (fid != lastFid && lastFid >= 0 && accLen > 0) {
+      // bascule FID = début d'une NOUVELLE frame → la précédente est complète
+      val frame = acc.copyOf(accLen)
+      accLen = 0
+      emitFrame(frame)
+    }
+    lastFid = fid
+    if (plen > 0) {
+      if (accLen + plen > acc.size) {
+        // frame trop grande : réalloue (caméra renvoyant plus que annoncé)
+        acc = acc.copyOf(maxOf(acc.size * 2, accLen + plen))
+      }
+      System.arraycopy(buf, off + hlen, acc, accLen, plen)
+      accLen += plen
+      if (isMjpeg) {
+        // EOI en bout de payload = frame complète, émission immédiate
+        if (accLen >= 4 && acc[0] == 0xFF.toByte() && acc[1] == 0xD8.toByte() &&
+            acc[accLen - 2] == 0xFF.toByte() && acc[accLen - 1] == 0xD9.toByte()) {
+          val frame = acc.copyOf(accLen)
+          accLen = 0
+          emitFrame(frame)
+        }
+      } else if (expectedFrame > 0 && accLen >= expectedFrame) {
+        // YUY2 : taille exacte annoncée — coupe au juste octet (le bourrage
+        // ISO des zéros après le dernier paquet partiel est éliminé)
+        val frame = acc.copyOf(expectedFrame)
+        accLen = 0
+        emitFrame(frame)
+      }
+    }
+  }
+
+  /** Boucle de lecture BULK — chaque bulkTransfer (≤ 16 Ko, plafond
+   *  Android) transporte UN paquet UVC ; l'accumulateur réassemble. */
+  private fun bulkReadLoop(conn: UsbDeviceConnection, ep: UsbEndpoint, bufSize: Int) {
     val buf = ByteArray(bufSize)
-    var acc = ByteArray(maxOf(payloadCap, 96 * 1024))
-    var accLen = 0
-    var lastFid = -1
     var errors = 0
     while (streaming) {
       val n = try { conn.bulkTransfer(ep, buf, buf.size, BULK_TIMEOUT_MS) } catch (_: Exception) { -1 }
@@ -562,40 +771,61 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
         continue
       }
       errors = 0
-      var pos = 0
-      while (pos + 2 <= n) {
-        val hlen = buf[pos].toInt() and 0xFF
-        if (hlen < 2 || pos + hlen > n) break // en-tête invalide : on jette le paquet
-        val hdr = buf[pos + 1].toInt() and 0xFF
-        val fid = hdr and 0x01            // Frame Identifier (bascule par frame)
-        val err = (hdr and 0x20) != 0     // ERR : frame corrompue → jetée
-        val plen = maxOf(0, n - (pos + hlen))
-        if (err) { accLen = 0; pos += hlen + plen; continue }
-        if (fid != lastFid && lastFid >= 0 && accLen > 0) {
-          // bascule FID = début d'une NOUVELLE frame → la précédente est complète
-          val frame = acc.copyOf(accLen)
-          accLen = 0
-          emitFrame(frame)
-        }
-        lastFid = fid
-        if (plen > 0) {
-          if (accLen + plen > acc.size) {
-            // frame trop grande : réalloue (caméra renvoyant plus que annoncé)
-            acc = ByteArray(maxOf(acc.size * 2, accLen + plen))
-          }
-          System.arraycopy(buf, pos + hlen, acc, accLen, plen)
-          accLen += plen
-          // MJPEG : EOI en bout de payload = frame complète, émission immédiate
-          if (isMjpeg && accLen >= 4 &&
-              acc[0] == 0xFF.toByte() && acc[1] == 0xD8.toByte() &&
-              acc[accLen - 2] == 0xFF.toByte() && acc[accLen - 1] == 0xD9.toByte()) {
-            val frame = acc.copyOf(accLen)
-            accLen = 0
-            emitFrame(frame)
-          }
-        }
-        pos += hlen + plen
+      ingestPacket(buf, 0, n)
+    }
+  }
+
+  /**
+   * Boucle de lecture ISO (webcams grand public) — anneau de UsbRequest :
+   * libusbhost coupe chaque buffer en tranches wMaxPacketSize BRUT (une
+   * tranche par microframe) ; requestWait() rend les requêtes complétées
+   * dans l'ordre. Parsing par tranche : en-tête UVC présent = paquet
+   * utile, payload intégralement nul = microtrame sans donnée ; puis
+   * zero-fill + re-queue. Les zéros de bourrage en fin de frame sont
+   * neutralisés par la troncature exacte (UNCOMPRESSED) ou l'EOI/FID
+   * (MJPEG).
+   */
+  private fun isoReadLoop(
+      conn: UsbDeviceConnection, reqs: List<UsbRequest>,
+      bufs: Map<UsbRequest, ByteBuffer>, packetSize: Int,
+  ) {
+    val total = packetSize * ISO_PACKETS_PER_REQ
+    val chunk = ByteArray(total)
+    val zeros = ByteArray(16_384)
+    var idx = 0
+    var errors = 0
+    while (streaming && reqs.isNotEmpty()) {
+      val r = try { conn.requestWait() } catch (_: Exception) { null }
+      if (r == null || !reqs.contains(r)) {
+        errors += 1
+        if (errors > MAX_READ_ERRORS) { notifyDead(); return }
+        continue
       }
+      val b = bufs[r]
+      if (b == null) { errors += 1; continue }
+      errors = 0
+      b.rewind()
+      b.get(chunk)
+      var off = 0
+      for (p in 0 until ISO_PACKETS_PER_REQ) {
+        val end = off + packetSize
+        if (end <= total) {
+          val hlen = chunk[off].toInt() and 0xFF
+          if (hlen in 2..32 && !allZeros(chunk, off + hlen, end)) {
+            ingestPacket(chunk, off, end)
+          }
+        }
+        off = end
+      }
+      // zero-fill (les paquets vides restent à zéro → ignorés au prochain
+      // tour) puis re-queue immédiate
+      b.clear(); b.rewind()
+      var p = 0
+      while (p < total) { val n = minOf(zeros.size, total - p); b.put(zeros, 0, n); p += n }
+      b.rewind()
+      val re = try { r.queue(b) } catch (_: Exception) { false }
+      if (!re) { notifyDead(); return }
+      idx = (idx + 1) % reqs.size
     }
   }
 
@@ -1015,6 +1245,14 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
     streaming = false
     try { readThread?.interrupt() } catch (_: Exception) {}
     readThread = null
+    val reqs = isoRequests
+    isoRequests = null
+    if (reqs != null) {
+      for (r in reqs) {
+        try { r.cancel() } catch (_: Exception) {}
+        try { r.close() } catch (_: Exception) {}
+      }
+    }
     val conn = connection
     connection = null
     val vsIf = vsInterface

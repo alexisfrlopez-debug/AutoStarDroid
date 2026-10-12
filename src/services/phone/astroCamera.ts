@@ -93,7 +93,8 @@ export interface ManualParams {
 
 export interface CameraDeviceInfo {
   id: string;
-  facing: 'external' | 'back';
+  /** Position : externe (UVC / HAL externe), arrière ou avant. */
+  facing: 'external' | 'back' | 'front';
   external: boolean;
   /** Capteur avec mode manuel (ISO + temps de pose) — idéal planétaire. */
   manual: boolean;
@@ -102,6 +103,11 @@ export interface CameraDeviceInfo {
   minExposureComp: number;
   maxExposureComp: number;
   label: string;
+  /** Rôle du capteur (v2.8.1 — « front/rear/grand angle/IR selon les
+   *  options du téléphone ») : wide | main | tele | depth | external. */
+  role: string;
+  /** Focale min (mm) — hint d'affichage. */
+  focal?: number;
   /** Backend : USB-host UVC direct ou Camera2 (interne/externe-HAL). */
   source: 'uvc' | 'camera2';
   /** deviceName UsbManager (UVC) — requis pour permission + contrôles. */
@@ -189,7 +195,11 @@ function emitter(): NativeEventEmitter | null {
 
 export const astroCamera = {
   /** Caméras disponibles ([] si modules absents) : UVC d'abord (la cible
-   *  principale — caméra astro), Camera2 ensuite (interne en secours). */
+   *  principale — caméra astro), Camera2 ensuite (interne en secours).
+   *  v2.8.1 : facing 'front'|'back'|'external' + rôle du capteur — l'écran
+   *  sépare « Interne » / « Externe » puis liste chaque caméra avec son
+   *  rôle (arrière principale, grand-angle, téléobjectif, frontale,
+   *  profondeur/IR, UVC externe). */
   async listCameras(): Promise<CameraDeviceInfo[]> {
     const out: CameraDeviceInfo[] = [];
     if (UVC) {
@@ -206,6 +216,7 @@ export const astroCamera = {
             minExposureComp: 0,
             maxExposureComp: 0,
             label: d.label,
+            role: 'external',
             source: 'uvc',
             deviceName: d.deviceName,
           });
@@ -216,9 +227,11 @@ export const astroCamera = {
       try {
         const c2 = (await CAM.listCameras()) ?? [];
         for (const d of c2) {
+          const facing = d.facing === 'external' ? 'external'
+            : d.facing === 'front' ? 'front' : 'back';
           out.push({
             id: d.id ?? '',
-            facing: d.facing === 'external' ? 'external' : 'back',
+            facing,
             external: d.external === true,
             manual: d.manual === true,
             sizes: d.sizes ?? [],
@@ -226,6 +239,8 @@ export const astroCamera = {
             minExposureComp: d.minExposureComp ?? 0,
             maxExposureComp: d.maxExposureComp ?? 0,
             label: d.label ?? 'Caméra',
+            role: d.role ?? 'main',
+            focal: d.focal,
             source: 'camera2',
           });
         }
