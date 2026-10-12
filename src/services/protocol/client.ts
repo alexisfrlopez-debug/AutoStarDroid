@@ -21,11 +21,12 @@ import {useSettingsStore} from '../../store/settingsStore';
 import {useScopeStore} from '../../store/scopeStore';
 import {useMotorCalibStore} from '../../store/motorCalibStore';
 import {
-  raDeltaDeg, relayDecision, relaySignWasWrong,
+  raDeltaDeg, relayDecision, relaySignWasWrong, relayAltBlocked,
   type RelayRates, type RelaySigns,
 } from '../astro/gotorelay';
 import {DEFAULT_SKY_RATES} from '../astro/tracking';
 import {raDecToAltAz} from '../astro/coords';
+import {activePreset} from '../mounts/catalog';
 import {sleep} from '../util';
 
 /* API publique déplacée dans driver.ts (alias ré-exportés pour compat) : */
@@ -704,6 +705,48 @@ export class AutostarClient implements DriverClient {
     this.ownMoveUntil = Date.now() + 1200;
   }
 
+  /* ---------- ARRÊT GOTO (v2.9.2 — « j'ai aucun moyen de l'arrêter ») ---- */
+
+  /** Génération du relais courant — un nouveau GOTO (ou le bouton ARRÊTER)
+   *  incrémente ce compteur : l'ancien relais le voit à son prochain point
+   *  d'annulation (≤ 250 ms) et s'arrête net. AVANT v2.9.2, deux GOTO
+   *  successifs laissaient deux boucles piloter les moteurs en même temps
+   *  (la monture finissait en butée). */
+  private relayGen = 0;
+
+  /** ARRÊT IMMÉDIAT du GOTO en cours (relais boucle fermée OU slew direct)
+   *  — bouton ARRÊTER global. Coupe les moteurs tout de suite (:Q#), tue le
+   *  relais (génération) et libère l'interface. */
+  async abortGoto() {
+    this.relayGen += 1; // le relais en cours sortira en 'aborted' (≤ 250 ms)
+    this.bump();
+    useScopeStore.getState().setGotoRunning(false);
+    useScopeStore.getState().pushLog('info', 'GOTO arrêté (commande utilisateur)');
+    await this.stopAll().catch(() => undefined);
+  }
+
+  /** Sommeil morcelé qui surveille la génération du relais : renvoie false
+   *  si le relais a été annulé (nouveau GOTO ou bouton ARRÊTER) — l'arrêt
+   *  est donc vu en ≤ 250 ms au lieu d'attendre la fin de l'impulsion
+   *  (jusqu'à 10 s). */
+  private async sleepCancellable(ms: number, gen: number): Promise<boolean> {
+    let left = ms;
+    while (left > 0) {
+      if (gen !== this.relayGen) return false;
+      const step = Math.min(250, left);
+      await sleep(step);
+      left -= step;
+    }
+    return gen === this.relayGen;
+  }
+
+  /** Sortie d'annulation du relais : moteurs coupés, statut 'aborted'. */
+  private async relayAbortExit(): Promise<GotoStatus> {
+    await this.stopAll().catch(() => undefined);
+    this.ownMoveUntil = Date.now() + 1200;
+    return 'aborted';
+  }
+
   // setTargetBit / probeSlewStarted : logique Meade déplacée dans
   // drivers/meade.ts (setTargetBit, probeSlewStarted) — le client route.
 
@@ -720,6 +763,11 @@ export class AutostarClient implements DriverClient {
    *  — multi-marques depuis v2.6.0 (Meade, NexStar, SynScan, iOptron). */
   async gotoRaDec(raDeg: number, decDeg: number, horizonNow?: Date): Promise<GotoStatus> {
     this.bump();
+    // v2.9.2 : SINGLE-FLIGHT — incrémenter la génération tue tout relais
+    // encore en cours (changement de cible pendant un GOTO) ; la boucle
+    // ancienne sort en ≤ 250 ms sans commander le moindre moteur de plus.
+    const gen = ++this.relayGen;
+    useScopeStore.getState().setGotoRunning(true); // bouton ARRÊTER global
     // PHASE CRITIQUE (v2.1.1) : le polling (:ED#/:Gr#/:Gd#) est suspendu
     // pendant toute la séquence — un GOTO lancé depuis l'app doit avoir la
     // ligne série pour lui seul, sinon les expirations des commandes de poll
@@ -746,9 +794,10 @@ export class AutostarClient implements DriverClient {
         this.log('error', 'RELAIS indisponible sur ce protocole — GOTO abandonné');
         return r;
       }
-      return await this.gotoRaDecRelay(raDeg, decDeg, r, horizonNow);
+      return await this.gotoRaDecRelay(raDeg, decDeg, r, horizonNow, gen);
     } finally {
       this.cmdPhase = false;
+      useScopeStore.getState().setGotoRunning(false);
     }
   }
 
@@ -765,9 +814,16 @@ export class AutostarClient implements DriverClient {
   }
 
   /** Taux du relais : taux MESURÉS au calibrage si disponibles pour la
-   *  vitesse demandée, sinon taux théoriques du ciel. */
+   *  vitesse demandée, sinon taux du PRESET de monture (v2.9.2 — le
+   *  calibrage ne mesure qu'au taux center : le slew partait du défaut
+   *  générique 2°/s au lieu des 4-5°/s réels d'une DS/ETX, d'où un GOTO
+   *  « en vitesse très lente »), sinon taux théoriques du ciel. */
   private relayRates(): RelayRates {
     const mc = useMotorCalibStore.getState();
+    const st = useSettingsStore.getState();
+    const preset = activePreset(
+      st.mountBrandId, st.mountModelId, st.customMount,
+      useScopeStore.getState().model, st.mountPreset);
     const rateFor = (s: 'slew' | 'center'): number => {
       if (mc.apply && mc.rates && mc.rates.speed === s) {
         const raMeas = mc.rates.e ?? mc.rates.w;
@@ -775,7 +831,7 @@ export class AutostarClient implements DriverClient {
         const m = Math.min(raMeas ?? Infinity, decMeas ?? Infinity);
         if (Number.isFinite(m) && m > 1e-4) return m;
       }
-      return DEFAULT_SKY_RATES[s];
+      return preset.expectedRates[s] ?? DEFAULT_SKY_RATES[s];
     };
     return {slew: rateFor('slew'), center: rateFor('center')};
   }
@@ -799,7 +855,7 @@ export class AutostarClient implements DriverClient {
    * stopAll systématique en sortie. Notifie onGotoStart/onGotoArrival pour
    * le contrôle croisé télémétrie/moteurs et le réglage fin (v2.3.0/v2.2.0).
    */
-  private async gotoRaDecRelay(raDeg: number, decDeg: number, cause: GotoStatus, horizonNow?: Date): Promise<GotoStatus> {
+  private async gotoRaDecRelay(raDeg: number, decDeg: number, cause: GotoStatus, horizonNow?: Date, gen = this.relayGen): Promise<GotoStatus> {
     const log = (m: string) => useScopeStore.getState().pushLog('info', m);
     const logErr = (m: string) => useScopeStore.getState().pushLog('error', m);
     const causeTxt = cause === 'noLink' ? 'liaison perdue' : cause === 'refused' ? 'cible refusée' : 'raquette muette';
@@ -811,13 +867,25 @@ export class AutostarClient implements DriverClient {
       return 'noLink';
     }
 
-    // 2. horizon : le relais n'a pas le garde-fou :MS — le calcul d'altitude
-    //    du téléphone le remplace (refus honnête au lieu d'une butée brutale)
-    const site = useSettingsStore.getState().site;
+    // 2. butées de la monture (v2.9.2) — le relais n'a pas le garde-fou :MS :
+    //    le calcul d'altitude du téléphone le remplace, désormais pour les
+    //    DEUX butées du preset (avant : horizon seul — « le télescope monte
+    //    jusqu'à la butée et cherche à continuer de monter »).
+    const st = useSettingsStore.getState();
+    const site = st.site;
+    const preset = activePreset(
+      st.mountBrandId, st.mountModelId, st.customMount,
+      useScopeStore.getState().model, st.mountPreset);
     const alt = raDecToAltAz(raDeg, decDeg, site.latDeg, site.lonDeg, horizonNow ?? new Date()).altDeg;
     if (alt < 0) {
       log(`RELAIS : cible sous l'horizon (alt ${alt.toFixed(0)}°) — refus`);
       return 'belowHorizon';
+    }
+    const tgtBlock = relayAltBlocked(alt, preset.minAltDeg, preset.maxAltDeg);
+    if (tgtBlock) {
+      log(`RELAIS : cible hors butées de la monture ${preset.label} ` +
+          `(alt ${alt.toFixed(0)}° — ${tgtBlock === 'high' ? `butée haute ${preset.maxAltDeg}` : `butée basse ${preset.minAltDeg}`}°) — refus`);
+      return 'noObject';
     }
 
     // 3. position initiale — sans position lisible, rien n'est possible
@@ -855,11 +923,14 @@ export class AutostarClient implements DriverClient {
     let iterations = 0;
     try {
       while (Date.now() - startedAt < MAX_MS && this.isConnected() && iterations < 90) {
+        // v2.9.2 : annulation (bouton ARRÊTER ou nouveau GOTO) — vérifiée à
+        // CHAQUE itération, avant toute commande moteur
+        if (gen !== this.relayGen) return await this.relayAbortExit();
         iterations += 1;
         const d = relayDecision({
           raDeg: pos.raDeg, decDeg: pos.decDeg,
           targetRaDeg: raDeg, targetDecDeg: decDeg,
-          signs, rates, maxPulseS: 6,
+          signs, rates, maxPulseS: 10,
         });
         if (d.done) {
           await this.stopAll().catch(() => undefined);
@@ -886,19 +957,33 @@ export class AutostarClient implements DriverClient {
           startedDirs.push(d.dirs.decDir);
         }
         // arrêt INDIVIDUEL : chaque axe s'arrête à SA durée (mouvement
-        // parallèle à vitesse commune de la monture)
+        // parallèle à vitesse commune de la monture) — sommeils morcelés
+        // ANNULABLES (≤ 250 ms) : le bouton ARRÊTER ne doit jamais attendre
+        // la fin d'une impulsion
         if (raMs <= decMs) {
-          if (raMs > 0) await sleep(raMs);
+          if (raMs > 0 && !(await this.sleepCancellable(raMs, gen))) {
+            return await this.relayAbortExit();
+          }
           if (d.dirs.raDir) await this.stopMove(d.dirs.raDir).catch(() => undefined);
-          if (decMs - Math.max(raMs, 0) > 0) await sleep(decMs - Math.max(raMs, 0));
+          if (decMs - Math.max(raMs, 0) > 0 &&
+              !(await this.sleepCancellable(decMs - Math.max(raMs, 0), gen))) {
+            return await this.relayAbortExit();
+          }
           if (d.dirs.decDir) await this.stopMove(d.dirs.decDir).catch(() => undefined);
         } else {
-          if (decMs > 0) await sleep(decMs);
+          if (decMs > 0 && !(await this.sleepCancellable(decMs, gen))) {
+            return await this.relayAbortExit();
+          }
           if (d.dirs.decDir) await this.stopMove(d.dirs.decDir).catch(() => undefined);
-          if (raMs - Math.max(decMs, 0) > 0) await sleep(raMs - Math.max(decMs, 0));
+          if (raMs - Math.max(decMs, 0) > 0 &&
+              !(await this.sleepCancellable(raMs - Math.max(decMs, 0), gen))) {
+            return await this.relayAbortExit();
+          }
           if (d.dirs.raDir) await this.stopMove(d.dirs.raDir).catch(() => undefined);
         }
-        await sleep(350); // inertie mécanique avant relecture
+        if (!(await this.sleepCancellable(350, gen))) {
+          return await this.relayAbortExit(); // inertie mécanique avant relecture
+        }
         const next = await this.readPosition().catch(() => null);
         if (next) {
           const newRa = next.raDeg ?? pos.raDeg;
@@ -916,7 +1001,11 @@ export class AutostarClient implements DriverClient {
             log(`RELAIS : sens DEC inversé (${signs.dec > 0 ? 'Nord = DEC+' : 'Sud = DEC−'}) — convention du matériel apprise`);
             stalledStreak.dec = 0;
           }
-          // stalle : axes COMMANDÉS figés — butée atteinte ou moteur sans effet
+          // stalle : UN axe COMMANDÉ figé suffit (v2.9.2) — butée atteinte
+          // ou moteur sans effet. AVANT : il fallait que TOUS les axes
+          // commandés soient figés — l'axe en butée continuait donc d'être
+          // piloté tant que l'autre axe bougeait (« cherche à continuer de
+          // monter sans respecter la butée »).
           if (d.dirs.raDir) {
             stalledStreak.ra = next.raDeg != null && Math.abs(newRa - pos.raDeg) < 0.02
               ? stalledStreak.ra + 1 : 0;
@@ -925,18 +1014,30 @@ export class AutostarClient implements DriverClient {
             stalledStreak.dec = next.decDeg != null && Math.abs(newDec - pos.decDeg) < 0.02
               ? stalledStreak.dec + 1 : 0;
           }
-          const commandedAxes = (d.dirs.raDir ? 1 : 0) + (d.dirs.decDir ? 1 : 0);
-          const stalledAxes =
-            (d.dirs.raDir && stalledStreak.ra >= 3 ? 1 : 0) +
-            (d.dirs.decDir && stalledStreak.dec >= 3 ? 1 : 0);
-          if (commandedAxes > 0 && stalledAxes >= commandedAxes) {
+          if ((d.dirs.raDir && stalledStreak.ra >= 3) ||
+              (d.dirs.decDir && stalledStreak.dec >= 3)) {
             await this.stopAll().catch(() => undefined);
-            logErr('RELAIS interrompu : position figée malgré les impulsions (butée atteinte ou monture hors tension)');
+            const stuckAxis = (d.dirs.raDir && stalledStreak.ra >= 3) ? 'AD' : 'DEC';
+            logErr(`RELAIS interrompu : axe ${stuckAxis} figé malgré les impulsions (butée atteinte ou moteur sans effet)`);
             this.ownMoveUntil = Date.now() + 1200;
             return 'relayPartial';
           }
           pos.raDeg = newRa;
           pos.decDeg = newDec;
+          // garde butées CONTINUE (v2.9.2) : la position s'évalue en altitude
+          // à chaque itération — un pointage erroné ne doit JAMAIS pousser la
+          // monture dans sa course mécanique
+          const altCur = raDecToAltAz(
+            pos.raDeg, pos.decDeg, site.latDeg, site.lonDeg, new Date()).altDeg;
+          const blk = relayAltBlocked(altCur, preset.minAltDeg, preset.maxAltDeg);
+          if (blk) {
+            await this.stopAll().catch(() => undefined);
+            logErr(`RELAIS interrompu : butée ${blk === 'high' ? 'haute' : 'basse'} ` +
+                `de la monture ${preset.label} (${altCur.toFixed(0)}° — ` +
+                `course ${preset.minAltDeg}…${preset.maxAltDeg}°)`);
+            this.ownMoveUntil = Date.now() + 1200;
+            return 'relayPartial';
+          }
           useScopeStore.getState().setPosition(pos.raDeg, pos.decDeg); // carte du ciel suit le relais en live
         }
       }

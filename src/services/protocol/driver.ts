@@ -33,7 +33,7 @@ export interface RaDec {raDeg: number; decDeg: number}
 /** Résultat d'un GOTO (statuts finaux de l'app, indépendants du protocole). */
 export type GotoStatus =
   | 'ok' | 'belowHorizon' | 'noObject' | 'refused' | 'mute' | 'noLink'
-  | 'relayPartial';
+  | 'relayPartial' | 'aborted';
 
 /** Textes i18n nécessaires pour traduire un statut de GOTO. */
 export interface GotoErrorTexts {
@@ -48,6 +48,7 @@ export interface GotoErrorTexts {
 /** Message localisé pour un statut de GOTO — partagé par tous les écrans. */
 export function gotoErrorText(r: GotoStatus, x: GotoErrorTexts): string {
   if (r === 'ok') return '';
+  if (r === 'aborted') return ''; // arrêt demandé par l'utilisateur — pas une erreur
   return r === 'belowHorizon' ? x.belowHorizon
     : r === 'noObject' ? x.empty
     : r === 'noLink' ? x.gotoNoLink

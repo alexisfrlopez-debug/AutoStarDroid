@@ -158,3 +158,26 @@ export function relaySignWasWrong(remainBeforeDeg: number, remainAfterDeg: numbe
 export function relayStalled(pulseCommanded: boolean, positionMovedDeg: number, consecutive: number): boolean {
   return pulseCommanded && positionMovedDeg < RELAY_DEADBAND_DEG && consecutive >= 3;
 }
+
+/* ------------------------------------------------------------------ */
+/* Butées de monture (v2.9.2)                                          */
+/* ------------------------------------------------------------------ */
+
+/** Marge de sécurité autour des butées du preset (deg) — le relais ne
+ *  pousse plus l'altitude au-delà de [min + marge, max − marge]. */
+export const RELAY_ALT_MARGIN_DEG = 2;
+
+/** L'altitude est-elle HORS de la course autorisée de la monture ?
+ *  Renvoie 'high' (au-dessus de la butée haute), 'low' (sous la butée
+ *  basse) ou null (course autorisée). Utilisé DEUX fois par le relais :
+ *  au départ (cible refusée honnêtement) et EN CONTINU dans la boucle
+ *  (un pointage erroné ne doit jamais enfoncer la monture dans sa butée —
+ *  retour terrain v2.9.1 : « le télescope monte jusqu'à la butée et
+ *  cherche à continuer de monter sans la respecter »). */
+export function relayAltBlocked(
+  altDeg: number, minAltDeg: number, maxAltDeg: number,
+): 'high' | 'low' | null {
+  if (altDeg > maxAltDeg - RELAY_ALT_MARGIN_DEG) return 'high';
+  if (altDeg < minAltDeg + RELAY_ALT_MARGIN_DEG) return 'low';
+  return null;
+}

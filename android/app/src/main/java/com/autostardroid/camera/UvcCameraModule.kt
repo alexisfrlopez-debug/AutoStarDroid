@@ -483,6 +483,56 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
       vsIfNum = desc.vsIfNum
       controlUnitPu = desc.puId
       controlUnitCt = desc.ctId
+      // Interface PORTEUSE des endpoints — distincte de vsIfNum (contrôle)
+      // depuis le fallback v2.9.2 : un périphérique exotique peut publier ses
+      // endpoints sur une interface que le parsing brut n'attribue pas à la VS.
+      var epIfNum = desc.vsIfNum
+
+      // FALLBACK SCAN SDK (v2.9.2 — « Aucun endpoint VideoStreaming IN »
+      // persistait sur la caméra de l'utilisateur même avec le parsing ISO) :
+      // si le parsing des descripteurs BRUTS n'a trouvé AUCUN endpoint,
+      // rescanner les interfaces exposées par le noyau (UsbDevice) — tous
+      // alternate settings, tous types. Hiérarchie : interface VS du
+      // parsing → classe VIDEO sous-classe VS → classe VIDEO → toute
+      // interface hors AUDIO/HID (les micros ont des endpoints ISO IN qui
+      // ne doivent JAMAIS être pris pour du vidéo).
+      if (desc.vsEps.isEmpty()) {
+        val cands = ArrayList<Pair<VsEp, Int>>() // endpoint + interface propriétaire
+        for (k in 0 until dev.interfaceCount) {
+          val itf = dev.getInterface(k)
+          for (j in 0 until itf.endpointCount) {
+            val e = itf.getEndpoint(j)
+            if (e.direction != UsbConstants.USB_DIR_IN) continue
+            val bulk = e.type == UsbConstants.USB_ENDPOINT_XFER_BULK
+            val iso = e.type == UsbConstants.USB_ENDPOINT_XFER_ISOC
+            if (!bulk && !iso) continue
+            cands.add(Pair(VsEp(itf.alternateSetting, e.address, bulk, e.maxPacketSize), itf.id))
+          }
+        }
+        fun itfOf(id: Int): UsbInterface? {
+          for (k in 0 until dev.interfaceCount) {
+            val f = dev.getInterface(k)
+            if (f.id == id) return f
+          }
+          return null
+        }
+        val pick = cands.firstOrNull { (_, id) -> id == desc.vsIfNum }
+            ?: cands.firstOrNull { (_, id) ->
+              val f = itfOf(id)
+              f != null && f.interfaceClass == UsbConstants.USB_CLASS_VIDEO &&
+                  f.interfaceSubclass == SC_VIDEOSTREAMING }
+            ?: cands.firstOrNull { (_, id) ->
+              val f = itfOf(id)
+              f != null && f.interfaceClass == UsbConstants.USB_CLASS_VIDEO }
+            ?: cands.firstOrNull { (_, id) ->
+              val f = itfOf(id)
+              f != null && f.interfaceClass != UsbConstants.USB_CLASS_AUDIO &&
+                  f.interfaceClass != UsbConstants.USB_CLASS_HID }
+        if (pick != null) {
+          desc.vsEps.add(pick.first)
+          if (pick.second != desc.vsIfNum) epIfNum = pick.second
+        }
+      }
 
       val picked = if (formatIndex != null && frameIndex != null) {
         val f = desc.formats.firstOrNull { it.index == formatIndex }
@@ -512,14 +562,15 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
       val isoEpDescs = desc.vsEps.filterNot { it.bulk }.sortedBy { it.maxPacket }
       if (bulkEpDesc == null && isoEpDescs.isEmpty()) {
         conn.close()
-        // message enrichi v2.9.1 : ce que le parsing a VU (formats, alts,
-        // endpoints bruts) — indispensable pour diagnostiquer une caméra
-        // exotique d'après le seul retour utilisateur.
+        // message enrichi v2.9.1/2 : ce que le parsing a VU (formats, alts,
+        // endpoints bruts, nb d'interfaces au scan SDK) — indispensable pour
+        // diagnostiquer une caméra exotique d'après le seul retour utilisateur.
         return promise.reject("UVC",
-            "Aucun endpoint VideoStreaming IN (formats=%d, alts=[%s], eps=[%s])"
+            "Aucun endpoint VideoStreaming IN (formats=%d, alts=[%s], eps=[%s], ifaces=%d, epIf=%d)"
                 .format(Locale.US, desc.formats.size,
                     desc.vsAlts.joinToString(",") { it.toString() },
-                    desc.rawEps.joinToString(" ")))
+                    desc.rawEps.joinToString(" "),
+                    dev.interfaceCount, epIfNum))
       }
       val isoMode = bulkEpDesc == null
 
@@ -551,11 +602,13 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
         val bd = bulkEpDesc
         for (k in 0 until dev.interfaceCount) {
           val f = dev.getInterface(k)
-          if (f.id == vsIfNum && f.alternateSetting == bd.alt) { vsIf = f; break }
+          // epIfNum (v2.9.2) : l'interface PORTEUSE de l'endpoint — identique
+          // à vsIfNum sauf si le fallback SDK a trouvé les endpoints ailleurs
+          if (f.id == epIfNum && f.alternateSetting == bd.alt) { vsIf = f; break }
         }
         vsIf ?: run {
           conn.close()
-          return promise.reject("UVC", "Interface VS alt ${bd.alt} introuvable")
+          return promise.reject("UVC", "Interface VS alt ${bd.alt} introuvable (if $epIfNum)")
         }
         for (j in 0 until vsIf.endpointCount) {
           val e = vsIf.getEndpoint(j)
@@ -572,7 +625,7 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
         }
         // ACTIVE l'alternate setting porteur de l'endpoint — sans cela le
         // périphérique reste à alt 0 et chaque bulkTransfer échoue
-        if (!setAltSetting(conn, vsIfNum, bd.alt)) {
+        if (!setAltSetting(conn, epIfNum, bd.alt)) {
           conn.close()
           return promise.reject("UVC", "SET_INTERFACE(${bd.alt}) refusé")
         }
@@ -606,11 +659,11 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
           var f: UsbInterface? = null
           for (k in 0 until dev.interfaceCount) {
             val itf = dev.getInterface(k)
-            if (itf.id == vsIfNum && itf.alternateSetting == cd.alt) { f = itf; break }
+            if (itf.id == epIfNum && itf.alternateSetting == cd.alt) { f = itf; break }
           }
           f ?: continue
           if (!conn.claimInterface(f, true)) { altErr = "claim alt ${cd.alt}"; continue }
-          if (!setAltSetting(conn, vsIfNum, cd.alt)) { altErr = "SET_INTERFACE(${cd.alt})"; continue }
+          if (!setAltSetting(conn, epIfNum, cd.alt)) { altErr = "SET_INTERFACE(${cd.alt})"; continue }
           var e2: UsbEndpoint? = null
           for (j in 0 until f.endpointCount) {
             val e = f.getEndpoint(j)

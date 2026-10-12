@@ -4,6 +4,7 @@ import {useScopeStore} from '../store/scopeStore';
 import {useSettingsStore} from '../store/settingsStore';
 import {useTrackingStore} from '../store/trackingStore';
 import {useT} from '../i18n';
+import {GotoAbortButton} from './GotoAbortButton';
 import {usePal} from './ui';
 
 export function StatusHeader({onTap}: {onTap?: () => void}) {
@@ -23,8 +24,9 @@ export function StatusHeader({onTap}: {onTap?: () => void}) {
     connStatus === 'connecting' ? t.common.connecting :
     connStatus === 'error' ? t.common.error : t.common.disconnected;
   return (
-    <TouchableOpacity onPress={onTap} disabled={!onTap}
-      style={{flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 10, paddingHorizontal: 14}}>
+    <View style={{flexDirection: 'row', alignItems: 'center'}}>
+      <TouchableOpacity onPress={onTap} disabled={!onTap}
+        style={{flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', flex: 1, paddingVertical: 10, paddingHorizontal: 14}}>
       <View style={{flexDirection: 'row', alignItems: 'center'}}>
         <View style={{width: 10, height: 10, borderRadius: 5, backgroundColor: color, marginRight: 8}} />
         <Text style={{color: c.text, fontWeight: '700', fontSize: 14}}>{label}</Text>
@@ -44,6 +46,10 @@ export function StatusHeader({onTap}: {onTap?: () => void}) {
         ) : null}
       </View>
       <Text style={{color: c.textDim, fontSize: 12}}>{t.models[current]}</Text>
-    </TouchableOpacity>
+      </TouchableOpacity>
+      {/* Bouton ARRÊTER le GOTO (v2.9.2) — visible seulement pendant un
+          GOTO, disponible sur tous les écrans qui affichent cet en-tête. */}
+      <GotoAbortButton />
+    </View>
   );
 }

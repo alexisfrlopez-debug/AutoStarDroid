@@ -69,8 +69,12 @@ interface ScopeState {
   azDeg: number | null; // lu en direct (:Gz)
   scopeTime: string; // 'HH:MM:SS' lu sur la raquette
   scopeDate: string; // 'MM/JJ/AA'
+  /** Un GOTO (direct ou relais boucle fermée) est en cours — affiche le
+   *  bouton ARRÊTER global (v2.9.2). */
+  gotoRunning: boolean;
   log: LogLine[];
   setConnStatus: (s: ConnStatus) => void;
+  setGotoRunning: (v: boolean) => void;
   setTransportType: (t: TransportType | null) => void;
   setModel: (m: ScopeModelId | null) => void;
   setDriverId: (d: DriverId | null) => void;
@@ -123,6 +127,7 @@ const initial = {
   lcdAt: 0,
   altDeg: null as number | null,
   azDeg: null as number | null,
+  gotoRunning: false,
   scopeTime: '--:--:--',
   scopeDate: '--/--/--',
   log: [] as LogLine[],
@@ -150,6 +155,7 @@ export const useScopeStore = create<ScopeState>((set) => ({
   setLcdMirror: (lcdLine1, lcdLine2) => set({lcdLine1, lcdLine2, lcdAt: Date.now()}),
   clearLcdMirror: () => set({lcdLine1: null, lcdLine2: null, lcdAt: 0}),
   setAltAz: (altDeg, azDeg) => set({altDeg, azDeg}),
+  setGotoRunning: (gotoRunning) => set({gotoRunning}),
   setScopeTime: (scopeTime) => set({scopeTime}),
   setScopeDate: (scopeDate) => set({scopeDate}),
   pushLog: (dir, text) =>

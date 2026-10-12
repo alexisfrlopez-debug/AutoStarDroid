@@ -1,17 +1,19 @@
 /**
- * ÉCRAN SERVICES DISTANTS (v2.9.0 — « un onglet supplémentaire avec un menu
- * déroulant permettant de se connecter au choix à des services de
- * télescopes distants ») :
+ * ÉCRAN SERVICES DISTANTS (v2.9.0, session PLEIN ÉCRAN v2.9.2) :
  *  - MENU DÉROULANT des services regroupés par famille (expérience en direct,
  *    observatoires publics gratuits, réseaux professionnels/éducatifs) ;
  *  - ENCADRÉ RÉCAPITULATIF du service choisi : opérateur, accès, mode,
  *    vidéo, présentation, fonctionnalités, site ;
- *  - COMPTE : création de compte (WebView sur la page d'inscription),
- *    identifiants mémorisés par service, connexion automatique (remplissage
- *    du formulaire via script injecté — chaîne pure, règle Hermes bridge) ;
- *  - SESSION : WebView intégrée (vidéo, pilotage, file d'attente — tout ce
- *    que le service offre dans son interface web), raccourcis par service,
- *    rechargement et déconnexion.
+ *  - COMPTE : identifiants mémorisés par service + connexion automatique
+ *    (remplissage du formulaire via script injecté — chaîne pure, règle
+ *    Hermes bridge). v2.9.2 : l'option « Créer un compte » disparaît —
+ *    l'inscription se fait sur le site du service, l'app garde la gestion
+ *    des identifiants ;
+ *  - SESSION (v2.9.2) : PLEIN ÉCRAN — la WebView occupe tout l'écran sous
+ *    la barre de raccourcis, donc elle défile NATIVEMENT (la v2.9.0 l' UM
+ *    emboîtait à hauteur fixe dans la ScrollView de l'écran : sur Android
+ *    la page web ne défilait PAS dans son encadré). Vidéo, pilotage et
+ *    files d'attente du service dans l'onglet, rechargement, déconnexion.
  */
 import {useState} from 'react';
 import {View, Text, ScrollView, TouchableOpacity} from 'react-native';
@@ -26,8 +28,6 @@ import {buildAutoLoginScript} from '../services/remote/autoLogin';
 import {Dropdown, type DropdownOption} from '../components/Dropdown';
 import {StatusHeader} from '../components/StatusHeader';
 import {Btn, Card, Input, Title, Toggle, usePal} from '../components/ui';
-
-const WEBVIEW_H = 460;
 
 /** Étiquette i18n d'une famille de services. */
 function catLabel(t: ReturnType<typeof useT>, cat: RemoteCategory): string {
@@ -88,9 +88,13 @@ function InfoBox({svc, t, c, lang}: {svc: RemoteService; t: ReturnType<typeof us
   );
 }
 
-function ServiceWebView({session, svc, t, c}: {session: RemoteSession; svc: RemoteService; t: ReturnType<typeof useT>; c: ReturnType<typeof usePal>}) {
+/** SESSION PLEIN ÉCRAN (v2.9.2) — la WebView N'EST PAS dans une ScrollView :
+ *  elle remplit l'écran (flex: 1) et défile nativement, le conflit de
+ *  gestes Android WebView/ScrollView disparaît. */
+function SessionScreen({session, svc, t, c}: {session: RemoteSession; svc: RemoteService; t: ReturnType<typeof useT>; c: ReturnType<typeof usePal>}) {
   const creds = useServicesStore((st) => st.creds);
   const setSessionUrl = useServicesStore((st) => st.setSessionUrl);
+  const closeSession = useServicesStore((st) => st.closeSession);
   const [reloadKey, setReloadKey] = useState(0);
   const [currentUrl, setCurrentUrl] = useState(session.url);
   const cred = creds[session.serviceId];
@@ -99,33 +103,55 @@ function ServiceWebView({session, svc, t, c}: {session: RemoteSession; svc: Remo
       ? buildAutoLoginScript(cred.login, cred.password, true)
       : undefined;
   return (
-    <View>
-      <View style={{flexDirection: 'row', flexWrap: 'wrap', marginBottom: 8}}>
-        {svc.quickLinks.map((q) => (
+    <View style={{flex: 1, backgroundColor: c.bg}}>
+      <View style={{paddingHorizontal: 14, paddingTop: 6}}>
+        <View style={{flexDirection: 'row', alignItems: 'center'}}>
+          <View style={{flex: 1}}>
+            <Text style={{color: c.text, fontSize: 15, fontWeight: '700'}} numberOfLines={1}>
+              {svc.name}
+            </Text>
+            <Text style={{color: c.textDim, fontSize: 11}}>
+              {t.sv.session} · {session.phase === 'login' ? t.sv.phaseLogin : t.sv.active}
+            </Text>
+          </View>
           <TouchableOpacity
-            key={q.label}
-            onPress={() => { setCurrentUrl(q.url); setSessionUrl(q.url, 'session'); setReloadKey((k) => k + 1); }}
+            onPress={() => setReloadKey((k) => k + 1)}
             style={{
               backgroundColor: c.btnBg, borderRadius: 8, borderWidth: 1, borderColor: c.border,
-              paddingHorizontal: 10, paddingVertical: 6, marginRight: 6, marginBottom: 6,
+              paddingHorizontal: 12, paddingVertical: 7, marginRight: 8,
             }}>
-            <Text style={{color: c.blue, fontSize: 12, fontWeight: '600'}}>{q.label}</Text>
+            <Text style={{color: c.text, fontSize: 12, fontWeight: '600'}}>{t.sv.reload}</Text>
           </TouchableOpacity>
-        ))}
-        <TouchableOpacity
-          onPress={() => setReloadKey((k) => k + 1)}
-          style={{
-            backgroundColor: c.btnBg, borderRadius: 8, borderWidth: 1, borderColor: c.border,
-            paddingHorizontal: 10, paddingVertical: 6, marginRight: 6, marginBottom: 6,
-          }}>
-          <Text style={{color: c.text, fontSize: 12, fontWeight: '600'}}>{t.sv.reload}</Text>
-        </TouchableOpacity>
+          <TouchableOpacity
+            onPress={closeSession}
+            style={{
+              backgroundColor: c.bgPanel2, borderRadius: 8, borderWidth: 1, borderColor: c.red,
+              paddingHorizontal: 12, paddingVertical: 7,
+            }}>
+            <Text style={{color: c.red, fontSize: 12, fontWeight: '700'}}>{t.sv.logout}</Text>
+          </TouchableOpacity>
+        </View>
+        {svc.quickLinks.length > 0 ? (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{marginTop: 8}}>
+            {svc.quickLinks.map((q) => (
+              <TouchableOpacity
+                key={q.label}
+                onPress={() => { setCurrentUrl(q.url); setSessionUrl(q.url, 'session'); setReloadKey((k) => k + 1); }}
+                style={{
+                  backgroundColor: c.btnBg, borderRadius: 8, borderWidth: 1, borderColor: c.border,
+                  paddingHorizontal: 10, paddingVertical: 6, marginRight: 6, marginBottom: 4,
+                }}>
+                <Text style={{color: c.blue, fontSize: 12, fontWeight: '600'}}>{q.label}</Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+        ) : null}
       </View>
-      <View style={{borderRadius: 10, overflow: 'hidden', borderWidth: 1, borderColor: c.border}}>
+      <View style={{flex: 1, margin: 14, marginTop: 8, borderRadius: 10, overflow: 'hidden', borderWidth: 1, borderColor: c.border}}>
         <WebView
           key={`${session.serviceId}-${currentUrl}-${reloadKey}`}
           source={{uri: currentUrl}}
-          style={{height: WEBVIEW_H, backgroundColor: c.bg}}
+          style={{flex: 1, backgroundColor: c.bg}}
           javaScriptEnabled
           domStorageEnabled
           mediaPlaybackRequiresUserAction={false}
@@ -139,12 +165,12 @@ function ServiceWebView({session, svc, t, c}: {session: RemoteSession; svc: Remo
           }}
         />
       </View>
-      <Text style={{color: c.textFaint, fontSize: 11, marginTop: 6}} numberOfLines={1}>
-        {currentUrl}
-      </Text>
-      {injected ? (
-        <Text style={{color: c.textDim, fontSize: 11, marginTop: 2}}>{t.sv.credsFilled}</Text>
-      ) : null}
+      <View style={{paddingHorizontal: 14, paddingBottom: 8}}>
+        <Text style={{color: c.textFaint, fontSize: 11}} numberOfLines={1}>{currentUrl}</Text>
+        {injected ? (
+          <Text style={{color: c.textDim, fontSize: 11, marginTop: 2}}>{t.sv.credsFilled}</Text>
+        ) : null}
+      </View>
     </View>
   );
 }
@@ -161,7 +187,6 @@ export function ServicesScreen() {
   const setCreds = useServicesStore((st) => st.setCreds);
   const clearCreds = useServicesStore((st) => st.clearCreds);
   const openSession = useServicesStore((st) => st.openSession);
-  const closeSession = useServicesStore((st) => st.closeSession);
   const selectService = useServicesStore((st) => st.selectService);
 
   const [selectedId, setSelectedId] = useState<string | null>(lastServiceId);
@@ -173,9 +198,12 @@ export function ServicesScreen() {
   const [saved, setSaved] = useState(false);
   const [cleared, setCleared] = useState(false);
 
-  // Session d'un AUTRE service que la sélection courante (ex. création de
-  // compte pendant qu'un autre service est affiché) : montrer la session.
+  // SESSION PLEIN ÉCRAN (v2.9.2) : quand une session est ouverte, elle
+  // REMPLIT l'onglet — la WebView défile nativement.
   const sessionSvc = session ? findService(session.serviceId) : null;
+  if (session && sessionSvc) {
+    return <SessionScreen session={session} svc={sessionSvc} t={t} c={c} />;
+  }
 
   const options: DropdownOption[] = [];
   for (const cat of CATEGORY_ORDER) {
@@ -248,14 +276,7 @@ export function ServicesScreen() {
               autoCorrect={false}
             />
             <Toggle value={auto} onChange={setAuto} label={sv.autoLogin} />
-            <View style={{flexDirection: 'row', marginTop: 8}}>
-              <Btn label={sv.save} onPress={saveCred} variant="primary" style={{flex: 1, marginRight: 6}} />
-              <Btn
-                label={sv.signup}
-                onPress={() => openSession(svc.id, svc.signupUrl ?? svc.site, 'signup')}
-                style={{flex: 1, marginLeft: 6}}
-              />
-            </View>
+            <Btn label={sv.save} onPress={saveCred} variant="primary" style={{marginTop: 8}} />
             {saved ? <Text style={{color: c.green, fontSize: 12, marginTop: 8}}>{sv.saved}</Text> : null}
             {cred ? (
               <TouchableOpacity onPress={() => { clearCreds(svc.id); setLogin(''); setPass(''); setCleared(true); setSaved(false); }} style={{marginTop: 10}}>
@@ -267,21 +288,10 @@ export function ServicesScreen() {
           </Card>
         ) : null}
 
-        {session && sessionSvc ? (
+        {svc ? (
           <Card>
             <Title text={sv.session} />
-            <Text style={{color: c.textDim, fontSize: 12, marginBottom: 8}}>
-              {sessionSvc.name} · {session.phase === 'login' ? sv.phaseLogin : session.phase === 'signup' ? sv.phaseSignup : sv.active}
-            </Text>
-            <ServiceWebView session={session} svc={sessionSvc} t={t} c={c} />
-            <Btn label={sv.logout} onPress={closeSession} variant="danger" style={{marginTop: 10}} />
-          </Card>
-        ) : svc ? (
-          <Card>
-            <Title text={sv.session} />
-            {!session ? (
-              <Text style={{color: c.textDim, fontSize: 12, marginBottom: 10, lineHeight: 18}}>{sv.sessionHint}</Text>
-            ) : null}
+            <Text style={{color: c.textDim, fontSize: 12, marginBottom: 10, lineHeight: 18}}>{sv.sessionHint}</Text>
             <Btn label={sv.connect} onPress={() => openSession(svc.id, svc.loginUrl, 'login')} variant="primary" />
           </Card>
         ) : null}
