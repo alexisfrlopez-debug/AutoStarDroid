@@ -4,7 +4,7 @@
 
 Application React Native (TypeScript) — package `com.autostardroid` — Android 7.0+ (minSdk 24).
 
-[![Build APK](https://github.com/alexisfrlopez-debug/AutoStarDroid/actions/workflows/android.yml/badge.svg)](https://github.com/alexisfrlopez-debug/AutoStarDroid/actions/workflows/android.yml) · [Feuille de route multi-plateformes](ROADMAP.md)
+[![Build APK](https://github.com/alexisfrlopez-debug/AutoStarDroid/actions/workflows/android.yml/badge.svg)](https://github.com/alexisfrlopez-debug/AutoStarDroid/actions/workflows/android.yml) · [Feuille de route multi-plateformes](livrables/documents/ROADMAP.md)
 
 ## Fonctionnalités
 
@@ -122,7 +122,7 @@ android/ .../usb/        Module natif Kotlin (usb-serial-for-android, JitPack)
 android/ .../bt/         Module natif Kotlin SPP (UUID 00001101-…)
 ```
 
-Protocole : voir `docs/PROTOCOLE.md`.
+Protocole : voir `livrables/documents/PROTOCOLE.md`.
 
 ## Crédits & sources de données
 
@@ -139,4 +139,4 @@ Protocole : voir `docs/PROTOCOLE.md`.
 
 ## Feuille de route
 
-Portage Windows (Microsoft Store), Google Play, macOS/Linux et modèle de monétisation : voir [ROADMAP.md](ROADMAP.md).
+Portage Windows (Microsoft Store), Google Play, macOS/Linux et modèle de monétisation : voir [ROADMAP.md](livrables/documents/ROADMAP.md).
