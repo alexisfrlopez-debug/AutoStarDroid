@@ -9,7 +9,7 @@
  * persistés avec statut par test (OK / attention / échec) et alimentation
  * du calibrage moteurs (raquette mise à jour : taux, backlash, dérive).
  */
-import {useState} from 'react';
+import {useEffect, useState} from 'react';
 import {View, Text, TouchableOpacity, Alert} from 'react-native';
 import {useT} from '../i18n';
 import {useScopeStore} from '../store/scopeStore';
@@ -81,6 +81,17 @@ export function Diagnostics() {
 
   const dx = t.align.diag;
 
+  // FIX v2.3.0 (retour terrain : « la série de calibrage est en cours dès le
+  // lancement, aucun moyen de l'arrêter ») : si le store dit « en cours »
+  // alors qu'AUCUNE suite ne tourne (app tuée pendant le diagnostic, état
+  // résiduel), on remet l'UI au repos AU MONTAGE — le bouton Arrêter redevient
+  // un vrai contrôle, et l'écran ne simule plus une activité fantôme.
+  useEffect(() => {
+    if (useDiagStore.getState().running && !diagRunner.isRunning) {
+      setRunning(false);
+    }
+  }, [setRunning]);
+
   const start = async () => {
     setRunning(true);
     setEv(null);
@@ -113,7 +124,13 @@ export function Diagnostics() {
     ]);
   };
 
-  const abort = () => diagRunner.abort();
+  // FIX v2.3.0 : le bouton Arrêter agit dans TOUS les cas — abort réel si la
+  // suite tourne (moteurs stoppés entre deux étapes), remise à zéro de l'UI
+  // si l'état « en cours » est un résidu sans suite active (zombie).
+  const abort = () => {
+    diagRunner.abort();
+    if (!diagRunner.isRunning) setRunning(false);
+  };
 
   /** Mise à jour MANUELLE de la raquette (horloge/site + rétro-jeu mesuré)
    *  — la même action que l'étape automatique de fin de diagnostic. */

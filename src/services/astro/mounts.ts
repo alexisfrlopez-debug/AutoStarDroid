@@ -151,6 +151,57 @@ export function limitLegGuardSec(
   return Math.min(240, Math.round((dist / rateDegPerSec) * 1.4) + 10);
 }
 
+/* ------------------------------------------------------------------ */
+/* Approche à VITESSE MAXIMALE (v2.3.0 — « tests adaptés à la monture   */
+/* choisie et faits à vitesse maximale quand c'est possible »)          */
+/* ------------------------------------------------------------------ */
+
+/** Marge d'arrêt (deg) conservée devant la butée quand on approche à la
+ *  vitesse slew : au-delà, on repasse à find puis center. 8° ≈ 1,6 s de
+ *  slew typique (5°/s) — largement suffisant pour casser la vitesse. */
+export const STOP_APPROACH_MARGIN_DEG = 8;
+
+/** Course restante (deg) jusqu'à la butée du preset, compte tenu du
+ *  déplacement DÉJÀ intégré au gyro. null si l'altitude de départ est
+ *  inconnue (aucune approche rapide possible : on reste prudent). */
+export function remainingToLimitDeg(
+  altStartDeg: number | null,
+  traveledDeg: number,
+  goingUp: boolean,
+  preset: MountPreset,
+): number | null {
+  if (altStartDeg == null) return null;
+  const limit = goingUp ? preset.maxAltDeg : preset.minAltDeg;
+  return Math.max(0, Math.abs(limit - altStartDeg) - Math.max(0, traveledDeg));
+}
+
+/**
+ * L'approche RAPIDE (vitesse slew) est possible si la course restante
+ * dépasse la marge d'arrêt + un arc de réaction (2 s au taux slew du
+ * preset). Sinon on reste à find. C'est le règle « vitesse maximale quand
+ * c'est possible », dérivée du preset de la MONTURE CHOISIE.
+ */
+export function fastApproachPossible(
+  remainingDeg: number | null,
+  preset: MountPreset,
+): boolean {
+  if (remainingDeg == null) return false;
+  const reaction = 2 * Math.max(0.5, preset.expectedRates.slew);
+  return remainingDeg >= STOP_APPROACH_MARGIN_DEG + reaction;
+}
+
+/** Garde-temps (s) de l'étage slew : distance à couvrir (remaining − marge)
+ *  au taux slew du preset, majorée 1,5×, plafonnée à 120 s. */
+export function fastApproachGuardSec(
+  remainingDeg: number | null,
+  preset: MountPreset,
+): number {
+  if (!fastApproachPossible(remainingDeg, preset)) return 0;
+  const dist = (remainingDeg as number) - STOP_APPROACH_MARGIN_DEG;
+  const rate = Math.max(0.5, preset.expectedRates.slew);
+  return Math.min(120, Math.round((dist / rate) * 1.5) + 5);
+}
+
 /** Preset actif : le choix manuel s'il existe, sinon la suggestion. */
 export function resolvePreset(
   manual: MountPresetId | 'auto',

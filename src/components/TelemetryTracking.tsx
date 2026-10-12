@@ -310,6 +310,17 @@ export function TelemetryTracking() {
       {fineTune.state === 'applied' ? (
         <Text style={{color: c.green, fontSize: 12, marginTop: 6}}>{t.align.track.ftApplied}</Text>
       ) : null}
+      {/* GARDE DE FLUIDITÉ (v2.3.0) : télémétrie jugée instable pendant le
+          GOTO (contrôle croisé) — réglage fin automatique REFUSÉ. */}
+      {fineTune.state === 'unreliable' ? (
+        <View style={{backgroundColor: c.bgPanel2, borderRadius: 10, borderWidth: 1, borderColor: c.danger, padding: 10, marginTop: 6}}>
+          <Text style={{color: c.orange, fontSize: 13, fontWeight: '700'}}>{t.align.track.ftUnreliable}</Text>
+          <Text style={{color: c.textDim, fontSize: 11, marginTop: 3, lineHeight: 16}}>
+            {t.align.track.ftUnreliableDesc.replace('{name}', fineTune.name ?? '—')}
+            {fineTune.beforeArcmin != null ? ` (${t.align.track.err} ${fineTune.beforeArcmin.toFixed(1)}′)` : ''}
+          </Text>
+        </View>
+      ) : null}
 
       {/* Statut live */}
       <View style={[s.row, s.between, {marginTop: 12}]}>

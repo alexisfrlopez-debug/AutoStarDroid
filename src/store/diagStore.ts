@@ -29,6 +29,18 @@ export const useDiagStore = create<DiagState>()(
     {
       name: 'autostardroid-diag',
       storage: createJSONStorage(() => AsyncStorage),
+      // FIX v2.3.0 : ne persister QUE le rapport. `running` était inclus dans
+      // la sauvegarde par défaut : une app tuée PENDANT la suite (ou un
+      // crash) relançait l'UI avec running=true SANS suite active — l'écran
+      // restait bloqué sur « diagnostic en cours » et le bouton Arrêter
+      // n'avait rien à arrêter (le runner, lui, repart à zéro).
+      partialize: (st) => ({report: st.report}) as unknown as DiagState,
+      // Ceinture et bretelles : la réhydratation n'a lieu qu'au démarrage de
+      // l'app, quand le runner est nécessairement au repos — toute trace
+      // « en cours » est un résidu d'exécution tuée : on l'efface.
+      onRehydrateStorage: () => (st) => {
+        if (st && st.running) st.setRunning(false);
+      },
     },
   ),
 );

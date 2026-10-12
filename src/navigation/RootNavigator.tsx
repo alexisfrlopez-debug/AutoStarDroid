@@ -10,12 +10,14 @@ import {theme} from '../theme/colors';
 import {ErrorBoundary} from '../ErrorBoundary';
 import {MainScreen} from '../screens/MainScreen';
 import {ObjectScreen} from '../screens/ObjectScreen';
+import {SkyScreen} from '../screens/SkyScreen';
 import {AlignScreen} from '../screens/AlignScreen';
 import {SetupScreen} from '../screens/SetupScreen';
 import {ConnectScreen} from '../screens/ConnectScreen';
 import {HandboxScreen} from '../screens/HandboxScreen';
 import {ConsoleScreen} from '../screens/ConsoleScreen';
 import {initFineTune} from '../services/tracking/fineTune';
+import {initGotoMonitor} from '../services/tracking/gotoMonitor';
 
 const Stack = createNativeStackNavigator();
 const Tabs = createBottomTabNavigator();
@@ -53,6 +55,8 @@ function MainTabs() {
         options={{tabBarLabel: t.tabs.main, tabBarIcon: ({color, focused}) => <TabIcon glyph="◈" focused={focused} color={color} />}} />
       <Tabs.Screen name="Objects" component={guarded('Objets', ObjectScreen)}
         options={{tabBarLabel: t.tabs.objects, tabBarIcon: ({color, focused}) => <TabIcon glyph="✦" focused={focused} color={color} />}} />
+      <Tabs.Screen name="Sky" component={guarded('Ciel', SkyScreen)}
+        options={{tabBarLabel: t.tabs.sky, tabBarIcon: ({color, focused}) => <TabIcon glyph="☾" focused={focused} color={color} />}} />
       <Tabs.Screen name="Align" component={guarded('Alignement', AlignScreen)}
         options={{tabBarLabel: t.tabs.align, tabBarIcon: ({color, focused}) => <TabIcon glyph="◎" focused={focused} color={color} />}} />
       <Tabs.Screen name="Handbox" component={guarded('Raquette', HandboxScreen)}
@@ -66,10 +70,12 @@ function MainTabs() {
 export function RootNavigator() {
   const nv = useSettingsStore((s) => s.nightVision);
   const c = theme(nv);
-  // Réglage fin télémétrique après GOTO (v2.2.0) : abonné UNE fois pour
-  // toute la session, quel que soit l'onglet d'où part le pointage.
+  // Réglage fin télémétrique après GOTO (v2.2.0) + moniteur de contrôle
+  // croisé télémétrie/moteurs (v2.3.0) : abonnés UNE fois pour toute la
+  // session, quel que soit l'onglet d'où part le pointage.
   useEffect(() => {
     initFineTune();
+    initGotoMonitor();
   }, []);
   const navTheme = {
     ...DefaultTheme,

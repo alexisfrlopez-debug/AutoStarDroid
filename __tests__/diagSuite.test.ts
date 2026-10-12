@@ -387,15 +387,18 @@ describe('Partie B — suite autonome complète (horloge virtuelle)', () => {
     expect(dt.values.pctP2PE!).toBeLessThan(5);
     expect(dt.values.stallsE).toBe(0);
 
-    // min/max élévation v2.2.0 : jambes à la vitesse find (0,4 °/s) bornées
-    // par la course du preset générique (45°→90° = 168 s de garde) — la
-    // monture SAINED déplace 0,4×168 ≈ 67° par jambe, sans toucher la butée.
+    // min/max élévation v2.3.0 : ÉTAGE SLEW en tête (2°/s jusqu'à la marge
+    // d'arrêt 8°) puis find — l'étage slew couvre ~37,6° (45→8° restants),
+    // la garde find recalculée sur la course RESTANTE (~7,4°) ajoute ~14,4°
+    // → jambe ≈ 52° au lieu de 67° (la suite va PLUS VITE : 19 s + 36 s
+    // contre 168 s avant). Descente symétrique depuis le sommet atteint.
     expect(statuses.limits).toBe('ok');
     const li = byId(report.results, 'limits')!;
     expect(li.values.altStartDeg!).toBeCloseTo(45, 1);
-    expect(li.values.upDeg!).toBeGreaterThan(60);
-    expect(li.values.upDeg!).toBeLessThan(75);
-    expect(li.values.downDeg!).toBeGreaterThan(60);
+    expect(li.values.upDeg!).toBeGreaterThan(45);
+    expect(li.values.upDeg!).toBeLessThan(60);
+    expect(li.values.downDeg!).toBeGreaterThan(85);
+    expect(li.values.downDeg!).toBeLessThan(112);
     expect(li.values.hitUp).toBe(0); // pas de butée sur monture libre
     expect(li.values.hitDown).toBe(0);
     expect(li.values.maxAltDeg!).toBeCloseTo(90, 0);  // reconstruction bornée

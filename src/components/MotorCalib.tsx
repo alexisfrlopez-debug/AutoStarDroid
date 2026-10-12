@@ -15,6 +15,7 @@ import {
   measureAllDirections,
   measureBacklash,
   measureDrift,
+  cancelCalib,
   type CalibPhase,
 } from '../services/tracking/motorcalService';
 import {Btn, Card, Segmented, Title, Toggle, usePal, s} from './ui';
@@ -148,6 +149,12 @@ export function MotorCalib() {
           {phaseDir}
           {busy ? ' …' : ''}
         </Text>
+      ) : null}
+
+      {/* v2.3.0 : toute mesure en cours est ARRÊTABLE — les moteurs sont
+          stoppés à la frontière de phase suivante. */}
+      {busy ? (
+        <Btn label={t.common.stop} onPress={cancelCalib} variant="danger" style={{marginTop: 8}} />
       ) : null}
 
       {/* Résultats */}

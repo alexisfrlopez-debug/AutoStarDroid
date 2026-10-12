@@ -838,6 +838,7 @@ export class AutostarClient {
       if (await this.probeSlewStarted()) {
         this.log('info', 'GO TO : monture en mouvement détectée — slew confirmé parti');
         this.ownMoveUntil = Date.now() + 45000;
+        this.notifyGotoStart(); // v2.3.0 : moniteur contrôle croisé armé
         this.watchSlewEnd();
         return 'ok';
       }
@@ -846,6 +847,7 @@ export class AutostarClient {
     }
     if (ms === '0') {
       this.ownMoveUntil = Date.now() + 45000; // GOTO : slew possiblement long
+      this.notifyGotoStart(); // v2.3.0 : moniteur contrôle croisé armé
       this.watchSlewEnd();
       return 'ok';
     }
@@ -886,10 +888,26 @@ export class AutostarClient {
    *  surveillance :D#) est terminé. JS pur — jamais transmis au natif. */
   private gotoArrivalCbs = new Set<(raDeg: number | null, decDeg: number | null) => void>();
 
+  /** Auditeurs notifiés au DÉPART d'un GOTO app (v2.3.0) — le moniteur de
+   *  contrôle croisé télémétrie/moteurs s'arme à cet instant. JS pur. */
+  private gotoStartCbs = new Set<() => void>();
+
   /** Enregistre un auditeur d'arrivée GOTO ; renvoie la fonction de retrait. */
   onGotoArrival(cb: (raDeg: number | null, decDeg: number | null) => void): () => void {
     this.gotoArrivalCbs.add(cb);
     return () => {this.gotoArrivalCbs.delete(cb);};
+  }
+
+  /** Enregistre un auditeur de départ GOTO app (v2.3.0) ; renvoie le retrait. */
+  onGotoStart(cb: () => void): () => void {
+    this.gotoStartCbs.add(cb);
+    return () => {this.gotoStartCbs.delete(cb);};
+  }
+
+  private notifyGotoStart() {
+    for (const cb of [...this.gotoStartCbs]) {
+      try {cb();} catch (_) { /* un auditeur fautif ne bloque pas les autres */ }
+    }
   }
 
   private notifyGotoArrival() {

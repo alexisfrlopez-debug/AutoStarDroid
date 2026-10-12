@@ -34,9 +34,12 @@ export type TrackPhase = 'idle' | 'running' | 'centering' | 'pulsing';
 
 /** Réglage fin télémétrique après GOTO (v2.2.0) — machine à états affichée
  *  dans le panneau de suivi : mesure avant correction, correction
- *  automatique, ATTENTE DE VALIDATION utilisateur, applied/dismissed. */
+ *  automatique, ATTENTE DE VALIDATION utilisateur, applied/dismissed.
+ *  v2.3.0 : état 'unreliable' — le contrôle croisé GOTO a jugé la télémétrie
+ *  instable pendant le slew : AUCUNE correction automatique, la télémétrie
+ *  n'est pas assez fluide pour guider les moteurs (sécurité). */
 export interface FineTuneInfo {
-  state: 'idle' | 'running' | 'awaitValidation' | 'applied' | 'dismissed';
+  state: 'idle' | 'running' | 'awaitValidation' | 'applied' | 'dismissed' | 'unreliable';
   /** Erreur de pointage AVANT correction (min d'arc). */
   beforeArcmin: number | null;
   /** Erreur APRÈS correction (min d'arc). */

@@ -102,4 +102,35 @@ describe('Panneau Diagnostic moteur (v2.1.0)', () => {
     expect(uncaught).toEqual([]);
     tree.unmount();
   });
+
+  it('v2.3.0 — état « en cours » RÉSIDUEL (app tuée pendant la série) : l\u2019UI se remet au repos au montage', async () => {
+    // Simule le retour terrain : `running` restait PERSISTÉ (bug v2.2.x) —
+    // au redémarrage l'écran montrait une série fantôme inarrêtable.
+    useDiagStore.getState().setRunning(true);
+    expect(useDiagStore.getState().running).toBe(true);
+    const tree = await createRTR(<Diagnostics />, {onUncaughtError: () => undefined} as any);
+    await flush();
+    // Le montage a détecté qu'AUCUNE suite ne tourne (diagRunner.isRunning
+    // = false) et a remis le store au repos : le bouton LANCER est de retour.
+    expect(useDiagStore.getState().running).toBe(false);
+    const texts: string[] = [];
+    tree.root.findAllByType(Text).forEach((n: any) => texts.push(String(n.props.children ?? '')));
+    expect(texts.join(' | ')).toContain('Lancer la série complète');
+    tree.unmount();
+  });
+
+  it('v2.3.0 — persistance : seul le rapport est écrit, jamais « running »', async () => {
+    const AsyncStorage = require('@react-native-async-storage/async-storage');
+    useDiagStore.getState().setReport(REPORT);
+    useDiagStore.getState().setRunning(true); // ancien bug : ceci était persisté
+    await flush(30); // laisse le middleware écrire
+    const calls = (AsyncStorage.setItem as jest.Mock).mock.calls
+      .filter((c: any[]) => c[0] === 'autostardroid-diag');
+    expect(calls.length).toBeGreaterThan(0);
+    const last = JSON.parse(calls[calls.length - 1][1]);
+    // CONTRAT : {state: {report}, version} — running jamais sur disque
+    expect(Object.keys(last.state)).toEqual(['report']);
+    useDiagStore.getState().setRunning(false);
+    useDiagStore.getState().clear();
+  });
 });

@@ -58,6 +58,7 @@ import {
 } from '../src/services/tracking/fineTune';
 import {useTrackingStore} from '../src/store/trackingStore';
 import {useTelemetryStore} from '../src/store/telemetryStore';
+import {useGotoCheckStore} from '../src/store/gotoCheckStore';
 import {useSettingsStore} from '../src/store/settingsStore';
 import {useScopeStore} from '../src/store/scopeStore';
 import {altAzToRaDec, raDecToAltAz} from '../src/services/astro/coords';
@@ -321,6 +322,26 @@ describe('fineTune v2.2.0 — réglage fin télémétrique après GOTO', () => {
     await jest.advanceTimersByTimeAsync(10000);
     const ft = useTrackingStore.getState().fineTune;
     expect(ft.state).toBe('idle');
+    expect(tp.writes.some((w) => /^:M[nsew]#$/.test(w))).toBe(false);
+  }, 30000);
+
+  it('v2.3.0 — contrôle croisé POOR : état « unreliable », AUCUN moteur', async () => {
+    const tp = new MountTransport();
+    await seedAndArm(tp, 0.005); // jeu réel : le réglage fin aurait voulu corriger
+    // Le moniteur de GOTO a rendu un verdict « télémétrie instable » pendant
+    // le slew (boussole perturbée) — cf. gotocheck.crossCheck.
+    useGotoCheckStore.getState().setReport({
+      verdict: 'poor', gyroDeg: 30, teleDeg: 4, ratio: 0.13,
+      smooth: {ok: false, n: 40, gapMaxMs: 2100, jitterPct: 180, spikeCount: 6, frozenPct: 10, meanStepDeg: 0.1},
+      reasons: ['sky.reasonJitter', 'sky.reasonRatio'],
+    });
+    await autostar.gotoRaDec(TARGET_RD.raDeg, TARGET_RD.decDeg);
+    await jest.advanceTimersByTimeAsync(10000);
+    const ft = useTrackingStore.getState().fineTune;
+    expect(ft.state).toBe('unreliable');
+    expect(ft.name).toBe('Vega test');
+    expect(ft.beforeArcmin).not.toBeNull();
+    // sécurité : AUCUNE impulsion moteur — la boussole ne guide plus rien
     expect(tp.writes.some((w) => /^:M[nsew]#$/.test(w))).toBe(false);
   }, 30000);
 });

@@ -34,6 +34,7 @@ import {raDecToAltAz} from '../astro/coords';
 import {planetRaDec, type PlanetName} from '../astro/planets';
 import {startOrientation} from '../phone/sensors';
 import {telemetryTracker} from './tracker';
+import {lastGotoVerdict} from '../../store/gotoCheckStore';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -105,6 +106,26 @@ async function onGotoArrival(): Promise<void> {
 
   busy = true;
   try {
+    // 0. GARDE DE FLUIDITÉ (v2.3.0) : le contrôle croisé du slew qui vient
+    //    de se terminer a-t-il jugé la télémétrie INSTABLE ? Alors AUCUNE
+    //    correction automatique — on ne déplace pas des moteurs sur la foi
+    //    d'une boussole qui décroche. L'utilisateur est informé (bannière
+    //    'unreliable' du panneau de suivi) et peut valider plus tard.
+    const verdict = lastGotoVerdict();
+    if (verdict === 'poor') {
+      await sleep(1200);
+      const qb = await captureQuat();
+      const errB = qb ? measureErr(target, qb) : null;
+      ts.setFineTune({
+        state: 'unreliable',
+        beforeArcmin: errB,
+        afterArcmin: null,
+        iterations: 0,
+        name: target.name,
+      });
+      return;
+    }
+
     // 1. mesurer AVANT (le tube vient de s'arrêter — laisser se stabiliser)
     await sleep(1200);
     const q0 = await captureQuat();

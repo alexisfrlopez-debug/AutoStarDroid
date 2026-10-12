@@ -43,7 +43,6 @@ import {
   rateMagnitudeDegPerSec,
 } from '../astro/motorcal';
 import {
-  DEFAULT_SKY_RATES,
   pointingError,
   type PulseDir,
 } from '../astro/tracking';
@@ -56,7 +55,13 @@ import {
   drivetrainStats,
   approachStopDecision,
 } from '../astro/diag';
-import {resolvePreset, limitLegGuardSec} from '../astro/mounts';
+import {
+  resolvePreset,
+  limitLegGuardSec,
+  remainingToLimitDeg,
+  fastApproachGuardSec,
+  STOP_APPROACH_MARGIN_DEG,
+} from '../astro/mounts';
 import {telemetryFitOf, useTelemetryStore} from '../../store/telemetryStore';
 import {applyFit, type Quat} from '../astro/telemetry';
 import {withAlt, type DisplayObject} from '../catalog';
@@ -109,7 +114,8 @@ export interface DiagEvent {
   progress: number;
 }
 
-/** Durées estimées (s) — progression et affichage UI. */
+/** Durées estimées (s) — progression et affichage UI. (limits revu à la
+ *  baisse v2.3.0 : l'étage à vitesse maximale raccourcit réellement le test.) */
 export const DIAG_TEST_DURATIONS_S: Record<DiagTestId, number> = {
   pre: 5,
   calib: 32,
@@ -117,7 +123,7 @@ export const DIAG_TEST_DURATIONS_S: Record<DiagTestId, number> = {
   backlash: 34,
   precision: 30,
   drivetrain: 42,
-  limits: 95,
+  limits: 55,
   goto: 60,
   drift: 28,
   handbox: 10,
@@ -269,8 +275,13 @@ class DiagRunner {
             this.suiteSlewRate = rs;
           }
           const mc = useMotorCalibStore.getState().rates;
-          const thC = DEFAULT_SKY_RATES.center;
-          const thF = DEFAULT_SKY_RATES.find;
+          // v2.3.0 : les taux THÉORIQUES viennent du PRESET DE LA MONTURE
+          // choisie (ETX/LX90/LX200/DS-114…) — plus de référence unique pour
+          // toutes les mécaniques : le ratio d'un DS-114 (center 0,053°/s)
+          // n'est plus jugé sur la base d'un LX200 (0,08°/s).
+          const preset = this.activePreset();
+          const thC = preset.expectedRates.center;
+          const thF = preset.expectedRates.find;
           vals.pctN = ratioPct(mc?.n ?? null, thC);
           vals.pctS = ratioPct(mc?.s ?? null, thC);
           vals.pctE = ratioPct(mc?.e ?? null, thC);
@@ -280,8 +291,7 @@ class DiagRunner {
           const linN = ratioPct(rn?.degPerSec ?? null, (mc?.n ?? rn?.degPerSec ?? thC) * (thF / thC));
           vals.linearityPct = linE != null && linN != null ? (linE + linN) / 2 : (linE ?? linN);
           // linéarité slew : taux slew réel vs center × (slew/center) preset
-          const preset = this.activePreset();
-          const slewExp = (mc?.e ?? thC) * (preset.expectedRates.slew / preset.expectedRates.center);
+          const slewExp = (mc?.e ?? thC) * (preset.expectedRates.slew / thC);
           vals.pctSlew = ratioPct(this.suiteSlewRate, slewExp);
           const pctList = [vals.pctN, vals.pctS, vals.pctE, vals.pctW].filter((v) => v != null) as number[];
           const sts = pctList.map(ratioStatus);
@@ -647,12 +657,20 @@ class DiagRunner {
       };
       const preset = this.activePreset();
       const expectedFind = this.suiteFindRate ?? preset.expectedRates.find;
-      // Axe AD (E) — 25 s
-      const profileE = await legProfile('e', 25000, expectedFind);
+      // v2.3.0 — jambes à ARC CONSTANT (~15° AD / ~9° DEC) : la durée se
+      // déduit du taux ATTENDU de la monture (mesuré ce cycle, sinon preset).
+      // Monture rapide (find 2°/s) → 7,5 s au lieu de 25 ; monture lente ou
+      // inconnue → plafonné aux durées historiques (25/15 s). Le test
+      // s'adapte à la MONTURE CHOISIE au lieu d'imposer sa durée à toutes.
+      const clampMs = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, Math.round(v)));
+      const legE = expectedFind > 1e-4 ? clampMs((15000 / expectedFind), 6000, 25000) : 25000;
+      const legN = expectedFind > 1e-4 ? clampMs((9000 / expectedFind), 5000, 15000) : 15000;
+      // Axe AD (E) — arc ~15°
+      const profileE = await legProfile('e', legE, expectedFind);
       await sleep(800);
-      // Axe DEC (N) — 15 s
+      // Axe DEC (N) — arc ~9°
       if (this.aborted) return {profileE, profileN: []};
-      const profileN = await legProfile('n', 15000, expectedFind);
+      const profileN = await legProfile('n', legN, expectedFind);
       return {profileE, profileN};
     } finally {
       gyroCollector.stop();
@@ -693,21 +711,64 @@ class DiagRunner {
       await sleep(1200);
       const bias = gyroBiasDegPerSec(gyroCollector.samples.filter((s) => s.t >= tb));
 
-      const leg = async (dir: 'n' | 's', goingUp: boolean): Promise<{deg: number; hit: boolean}> => {
+      const leg = async (dir: 'n' | 's', goingUp: boolean, baseAlt: number | null): Promise<{deg: number; hit: boolean}> => {
         emit('limits', goingUp ? 'up' : 'down', dir);
         const t0 = now();
         let hit = false;
+        let traveled = 0; // arc déjà couvert DANS cette jambe (|gyro intégré|)
 
-        // --- ÉTAGE 1 : vitesse find, garde = course restante ---
-        const guard1 = limitLegGuardSec(altStart, goingUp, preset, fastRate);
+        // --- ÉTAGE 0 (v2.3.0) : VITESSE MAXIMALE (slew) tant que la course
+        // restante de la MONTURE CHOISIE le permet. Garde calculée sur le
+        // preset (fastApproachGuardSec), sortie dès que la marge d'arrêt est
+        // atteinte (gyro intégré) ou que le taux chute (ralentissement/butée).
+        // Altitude inconnue → étage sauté (prudence : vitesse find direct).
+        const rem0 = remainingToLimitDeg(baseAlt, 0, goingUp, preset);
+        const guard0 = fastApproachGuardSec(rem0, preset);
+        if (guard0 > 0) {
+          emit('limits', 'travel', dir);
+          await autostar.setSpeed('slew');
+          const tf = now();
+          await autostar.startMove(dir);
+          while (now() - tf < guard0 * 1000) {
+            await sleep(LIMIT_TICK_MS);
+            if (this.aborted) break;
+            if (now() - tf <= LIMIT_SPINUP_SKIP_MS) continue;
+            traveled = Math.abs(integrateGyroAngleDeg(gyroCollector.samples, tf, now(), bias).deg);
+            const rem = remainingToLimitDeg(baseAlt, traveled, goingUp, preset);
+            if (rem != null && rem <= STOP_APPROACH_MARGIN_DEG) break; // relais à find
+            const dec = approachStopDecision(
+              recentRates(gyroCollector.samples, tf, now(), bias),
+              preset.expectedRates.slew,
+            );
+            if (dec === 'stopped') {hit = true; break;} // arrêt malgré slew
+            if (dec === 'slowdown') break;              // décélération : on casse la vitesse
+          }
+          await autostar.stopMove(dir);
+          await sleep(400);
+        }
+
+        // Altitude EFFECTIVE au départ de l'étage find (course RESTANTE
+        // exacte, bornée aux butées du preset) : la garde find est désormais
+        // recalculée sur ce qui RESTE à parcourir, pas sur la course initiale
+        // — c'est ce qui rend la jambe courte quand l'étage slew a couvert
+        // l'essentiel du chemin.
+        const altEff = baseAlt != null
+          ? goingUp
+            ? Math.min(preset.maxAltDeg, baseAlt + traveled)
+            : Math.max(preset.minAltDeg, baseAlt - traveled)
+          : null;
+
+        // --- ÉTAGE 1 : vitesse find, garde = course RESTANTE ---
+        const guard1 = limitLegGuardSec(altEff, goingUp, preset, fastRate);
         await autostar.setSpeed('find');
         await autostar.startMove(dir);
         let stage2 = false;
-        while (now() - t0 < guard1 * 1000) {
+        const t1 = now();
+        while (now() - t1 < guard1 * 1000) {
           await sleep(LIMIT_TICK_MS);
           if (this.aborted) break;
-          if (now() - t0 <= LIMIT_SPINUP_SKIP_MS) continue;
-          const rates = recentRates(gyroCollector.samples, t0, now(), bias);
+          if (now() - t1 <= LIMIT_SPINUP_SKIP_MS) continue;
+          const rates = recentRates(gyroCollector.samples, t1, now(), bias);
           const dec = approachStopDecision(rates, fastRate);
           if (dec === 'stopped') {
             // tube bloqué dès la vitesse find : déjà en butée (ou obstacle)
@@ -763,17 +824,24 @@ class DiagRunner {
         return {deg, hit};
       };
 
-      const up = await leg('n', true);
-      const down = this.aborted ? {deg: 0, hit: false} : await leg('s', false);
+      // v2.3.0 : la descente part du SOMMET atteint par la montée (altitude
+      // effective bornée au preset) — plus de garde calculée depuis l'altitude
+      // de départ alors que le tube a déjà gravi la moitié du ciel.
+      const clampAlt = (a: number) => Math.min(preset.maxAltDeg, Math.max(preset.minAltDeg, a));
+      const up = await leg('n', true, altStart);
+      const altAfterUp = altStart != null ? clampAlt(altStart + up.deg) : null;
+      const down = this.aborted ? {deg: 0, hit: false} : await leg('s', false, altAfterUp ?? altStart);
       const altNow = await autostar.readAltAz().catch(() => null);
       // Butées : altitude lue à :Ga# après l'ARRÊT (la raquette ne répond
       // plus pendant le mouvement — la lecture POST-arrêt est fiable),
-      // sinon reconstruction depuis l'altitude de départ + gyro intégré.
+      // sinon reconstruction : pic de montée = départ + arc monté, puis la
+      // descente repart de ce pic.
       const maxAlt = up.hit && altNow?.altDeg != null
         ? Math.min(90, altNow.altDeg)
         : altStart != null ? Math.min(90, altStart + up.deg) : null;
       const minAlt = down.hit && altNow?.altDeg != null
         ? Math.max(0, altNow.altDeg)
+        : altAfterUp != null ? Math.max(0, altAfterUp - down.deg)
         : altStart != null ? Math.max(0, altStart - down.deg) : null;
       return {altStart, maxAlt, minAlt, upDeg: up.deg, downDeg: down.deg, hitUp: up.hit, hitDown: down.hit};
     } finally {

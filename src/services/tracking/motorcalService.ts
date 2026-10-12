@@ -16,7 +16,9 @@
  */
 import {autostar} from '../protocol/client';
 import {useScopeStore} from '../../store/scopeStore';
+import {useSettingsStore} from '../../store/settingsStore';
 import {useMotorCalibStore, type MotorSpeed, type MeasuredRates} from '../../store/motorCalibStore';
+import {resolvePreset} from '../astro/mounts';
 import {startGyro, type GyroEvent} from '../phone/sensors';
 import {
   gyroBiasDegPerSec,
@@ -38,6 +40,15 @@ export function setCalibSleepForTests(fn: (ms: number) => Promise<void>) {
 }
 
 const R2D = 180 / Math.PI;
+
+/** Annulation (v2.3.0 — l'utilisateur doit pouvoir ARRÊTER une mesure en
+ *  cours) : drapeau consulté entre chaque phase motrice ; les mesures
+ *  individuelles sont courtes (≤ 6 s) — l'arrêt prend effet à la frontière
+ *  de phase suivante, moteurs stoppés. */
+let cancelled = false;
+export function cancelCalib(): void {cancelled = true;}
+function resetCancel(): void {cancelled = false;}
+function wasCancelled(): boolean {return cancelled;}
 
 export type CalibPhase =
   | 'idle'
@@ -93,6 +104,9 @@ export async function measureRate(
   onPhase: (p: CalibPhase) => void,
 ): Promise<RateMeasureResult> {
   if (!connGuard()) return {degPerSec: null, noise: 0};
+  // NOTE : pas de resetCancel() ici — measureRate est appelé EN BOUCLE par
+  // measureAllDirections ; le drapeau n'est réarmé que par les points
+  // d'entrée publics (mesure complète).
   gyroCollector.start(50);
   try {
     // 1. Biais : repos 1,2 s
@@ -136,14 +150,17 @@ export async function measureAllDirections(
   const dirs: PulseDir[] = ['e', 'w', 'n', 's'];
   const values: Partial<Record<PulseDir, number | null>> = {};
   let noise = 0;
+  resetCancel();
   for (const d of dirs) {
+    if (wasCancelled()) break;
     onPhase('move', d);
     const r = await measureRate(speed, d, (p) => onPhase(p, d));
     values[d] = r.degPerSec;
     noise = Math.max(noise, r.noise);
     await sleep(600);
   }
-  const allNull = dirs.every((d) => values[d] == null);
+  const done = dirs.filter((d) => values[d] !== undefined);
+  const allNull = done.every((d) => values[d] == null);
   if (allNull) return null;
   const rates: MeasuredRates = {
     speed,
@@ -169,12 +186,17 @@ export async function measureBacklash(
   onPhase: (p: CalibPhase) => void,
 ): Promise<{arcsec: number | null}> {
   if (!connGuard()) return {arcsec: null};
+  resetCancel();
   const mc = useMotorCalibStore.getState();
   // vitesse center : assez rapide pour franchir le seuil gyro, assez douce
   const speed: MotorSpeed = 'center';
+  // v2.3.0 : repli = taux center du PRESET de la monture choisie (un DS-114
+  // est lent : 0,053°/s — plus de 0,08°/s universel qui faussait la
+  // conversion en secondes d'arc sur les montures à pignons).
+  const preset = resolvePreset(useSettingsStore.getState().mountPreset, useScopeStore.getState().model);
   const rateDegPerSec =
     (mc.rates?.speed === speed ? (axis === 'ra' ? mc.rates.e ?? mc.rates.w : mc.rates.n ?? mc.rates.s) : null) ??
-    0.08;
+    preset.expectedRates.center;
   const prime: PulseDir = axis === 'ra' ? 'e' : 'n';
   const reverse: PulseDir = axis === 'ra' ? 'w' : 's';
 
@@ -190,6 +212,7 @@ export async function measureBacklash(
     await autostar.startMove(prime);
     await sleep(2500);
     await autostar.stopMove(prime);
+    if (wasCancelled()) return {arcsec: null};
 
     onPhase('gap');
     await sleep(1000);
@@ -231,6 +254,7 @@ export async function measureDrift(
     onPhase('bias');
     const tBias0 = Date.now();
     await sleep(1500);
+    if (wasCancelled()) return {degPerSec: null, vsSidereal: null};
     const bias = gyroBiasDegPerSec(gyroCollector.samples.filter((s) => s.t >= tBias0));
     onPhase('drift');
     const t0 = Date.now();
