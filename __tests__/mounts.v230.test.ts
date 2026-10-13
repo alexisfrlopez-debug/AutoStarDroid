@@ -54,11 +54,11 @@ describe('fastApproachPossible — vitesse maximale QUAND C\u2019EST POSSIBLE', 
   it('preset générique sans altitude → garde slew nulle', () => {
     expect(fastApproachGuardSec(null, GENERIC)).toBe(0);
   });
-  it('gardes slew cohérentes (distance / taux × 1,5 + 5 s, plafond 120 s)', () => {
+  it('gardes slew cohérentes (distance / taux × 1,5 + 5 s, plafond 90 s — v2.9.6)', () => {
     // ETX : 43° restants → dist = 43−8 = 35 → 35/5×1,5 = 10,5 → 11+5 = 16 s
     expect(fastApproachGuardSec(43, ETX)).toBe(16);
-    // très longue course → plafond 120
-    expect(fastApproachGuardSec(500, ETX)).toBe(120);
+    // très longue course → plafond 90
+    expect(fastApproachGuardSec(500, ETX)).toBe(90);
   });
 });
 

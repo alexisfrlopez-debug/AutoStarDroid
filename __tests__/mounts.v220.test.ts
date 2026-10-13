@@ -52,25 +52,25 @@ describe('resolvePreset — le choix manuel gagne', () => {
 
 describe('limitLegGuardSec — garde des jambes de butées (v2.2.0)', () => {
   const generic = MOUNT_PRESETS.generic;
-  it('course entière à la vitesse donnée + marge 1,4× + 10 s', () => {
-    // 45°→90° = 45° à 0,4°/s = 112,5 s ×1,4 +10 = 167,5 → 168
-    expect(limitLegGuardSec(45, true, generic, 0.4)).toBe(168);
+  it('course entière à la vitesse donnée + marge 1,4× + 10 s (v2.9.6 : plafond 150 s)', () => {
+    // 45°→90° = 45° à 0,4°/s = 112,5 s ×1,4 +10 = 167,5 → plafond 150
+    expect(limitLegGuardSec(45, true, generic, 0.4)).toBe(150);
   });
   it('descente : distance au minAlt', () => {
-    // 45°→0° = 45° à 0,4°/s → 168 s
-    expect(limitLegGuardSec(45, false, generic, 0.4)).toBe(168);
+    // 45°→0° = 45° à 0,4°/s → 167,5 → plafond 150
+    expect(limitLegGuardSec(45, false, generic, 0.4)).toBe(150);
   });
   it('proche de la butée → garde courte (mais ≥ 12 s)', () => {
     // 89°→90° = 1° (min 2° imposé) à 0,4°/s = 5 s ×1,4 +10 = 17
     expect(limitLegGuardSec(89, true, generic, 0.4)).toBe(17);
   });
-  it('plafonné à 240 s (monture bloquée : on n\'insiste pas)', () => {
-    // 0°→90° à 0,05°/s = 1800 s ×1,4 → clamp 240
-    expect(limitLegGuardSec(0, true, generic, 0.05)).toBe(240);
+  it('plafonné à 150 s (monture bloquée : on n\'insiste pas — v2.9.6 : 240 → 150)', () => {
+    // 0°→90° à 0,05°/s = 1800 s ×1,4 → clamp 150
+    expect(limitLegGuardSec(0, true, generic, 0.05)).toBe(150);
   });
-  it('altitude inconnue → moitié de la course (prudent)', () => {
-    // maxAlt-minAlt = 90 → moitié = 45 → même garde que 45→90
-    expect(limitLegGuardSec(null, true, generic, 0.4)).toBe(168);
+  it('altitude inconnue → moitié de la course (prudent, plafond 150 v2.9.6)', () => {
+    // maxAlt-minAlt = 90 → moitié = 45 → même garde que 45→90 (plafonnée)
+    expect(limitLegGuardSec(null, true, generic, 0.4)).toBe(150);
   });
   it('taux absurde → garde de repli 90 s', () => {
     expect(limitLegGuardSec(45, true, generic, 0)).toBe(90);

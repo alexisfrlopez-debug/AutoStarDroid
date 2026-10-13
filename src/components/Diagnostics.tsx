@@ -37,9 +37,10 @@ const STATUS_COLOR: Record<DiagStatus, string> = {
 /** Formatage d'une valeur selon sa clé (déjà renommée en clé i18n v*). */
 function fmtValue(key: string, v: number | null): string {
   if (v == null) return '—';
-  // Booléens encodés (succès GOTO / horloge poussée, butées touchées)
+  // Booléens encodés (succès GOTO / horloge poussée, butées touchées,
+  // alignement Home du préambule v2.9.6)
   if (key === 'vGotoOk' || key === 'vClockOk') return v >= 1 ? '✓' : '✗';
-  if (key === 'vHitUp' || key === 'vHitDown') return v >= 1 ? '✓' : '✗';
+  if (key === 'vHitUp' || key === 'vHitDown' || key === 'vHomeAlign') return v >= 1 ? '✓' : '✗';
   // Erreur de pointage en minutes d'arc
   if (key === 'vGotoErr') return `${v < 10 ? v.toFixed(1) : v.toFixed(0)}′`;
   // Pourcentages : ratios, linéarité, oscillation/RMS, répétabilité, rétro-jeu
@@ -172,6 +173,7 @@ export function Diagnostics() {
       pctP2PE: 'vP2PE', rmsPctE: 'vRmsE', stallsE: 'vStallE',
       pctP2PN: 'vP2PN', rmsPctN: 'vRmsN', stallsN: 'vStallN',
       biasMagDegPerSec: 'vBias', ambientNoiseDegPerSec: 'vNoise',
+      homeAlign: 'vHomeAlign',
       linearityPct: 'vLinearity', pctSlew: 'vPctSlew',
       meanDeg: 'vMean', stdDeg: 'vStd', spreadDeg: 'vSpread', relPct: 'vRel',
     };

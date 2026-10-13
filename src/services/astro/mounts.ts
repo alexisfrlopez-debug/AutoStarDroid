@@ -135,7 +135,9 @@ export function suggestPresetForModel(model: ScopeModelId | null): MountPresetId
  * Garde-temps (s) d'une jambe du test des butées : le temps nécessaire pour
  * rejoindre la butée du preset depuis l'altitude de départ, au taux donné,
  * MAJORÉ d'une marge 1,4× (taux réel inférieur au nominal, approche douce).
- * Plafonné à 240 s : même une monture bloquée ne reste pas en mouvement.
+ * Plafonné à 150 s (v2.9.6 : 240 s ne se voyait que sur détection défaillante
+ * — la butée du tube est détectée au gyro bien avant) : même une monture
+ * bloquée ne reste pas en mouvement.
  */
 export function limitLegGuardSec(
   altStartDeg: number | null,
@@ -148,7 +150,7 @@ export function limitLegGuardSec(
   const dist = altStartDeg == null
     ? Math.max(10, (preset.maxAltDeg - preset.minAltDeg) / 2) // altitude inconnue : moitié de la course
     : Math.max(2, Math.abs(limit - altStartDeg));
-  return Math.min(240, Math.round((dist / rateDegPerSec) * 1.4) + 10);
+  return Math.min(150, Math.round((dist / rateDegPerSec) * 1.4) + 10);
 }
 
 /* ------------------------------------------------------------------ */
@@ -191,7 +193,9 @@ export function fastApproachPossible(
 }
 
 /** Garde-temps (s) de l'étage slew : distance à couvrir (remaining − marge)
- *  au taux slew du preset, majorée 1,5×, plafonnée à 120 s. */
+ *  au taux slew du preset, majorée 1,5×, plafonnée à 90 s (v2.9.6 : 120 s
+ *  ne se voyait que si le taux réel était 4× sous le nominal — l'étage find
+ *  prend le relais dès la marge d'arrêt). */
 export function fastApproachGuardSec(
   remainingDeg: number | null,
   preset: MountPreset,
@@ -199,7 +203,7 @@ export function fastApproachGuardSec(
   if (!fastApproachPossible(remainingDeg, preset)) return 0;
   const dist = (remainingDeg as number) - STOP_APPROACH_MARGIN_DEG;
   const rate = Math.max(0.5, preset.expectedRates.slew);
-  return Math.min(120, Math.round((dist / rate) * 1.5) + 5);
+  return Math.min(90, Math.round((dist / rate) * 1.5) + 5);
 }
 
 /** Preset actif : le choix manuel s'il existe, sinon la suggestion. */

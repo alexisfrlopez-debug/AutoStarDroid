@@ -1452,6 +1452,54 @@ export class AutostarClient implements DriverClient {
     }
   }
 
+  /** ALIGNEMENT FORCÉ SUR HOME (v2.9.6) — préambule de la série de tests
+   *  (« il faudrait qu'elle impose un alignement sur home avant de se
+   *  lancer et qu'elle prenne cette position en compte pour les butées de
+   *  test ») :
+   *   1. GOTO de la position Home ⌂ par le RELAIS EN MODE PARC (identique
+   *      à parkToHome — la cible est à l'horizon, seule une cible < −5°
+   *      est refusée) ;
+   *   2. À L'ARRIVÉE, les coordonnées de la position Home sont RECALCULÉES
+   *      (l'horizontale tourne avec le ciel — celles du départ sont
+   *      périmées de la durée du trajet) et posées dans la raquette par
+   *      :Sr/:Sd/:CM# (syncRaDec) : la raquette croit désormais sincèrement
+   *      que le tube est à la position Home physique → :Ga# redevient
+   *      FIABLE pour les tests de butée (course restante, gardes) et le
+   *      pointage repart d'une base réelle.
+   *  Renvoie 'ok' | 'none' (pas de point Home / pas de relais) | 'nogoto'
+   *  (arrivée Home échouée — pas de SYNC) | 'nosync' (GOTO ok, SYNC refusé
+   *  ou muet). */
+  async alignToHome(): Promise<'ok' | 'none' | 'nogoto' | 'nosync'> {
+    const home = useTelemetryStore.getState().points.find((p) => p.home) ?? null;
+    if (!home || !this.drv.caps.relay) return 'none';
+    const st = useSettingsStore.getState();
+    const geo = homeGeometry(useScopeStore.getState().alignMode, st.site.latDeg);
+    const rd0 = altAzToRaDec(geo.altDeg, geo.azDeg, st.site.latDeg, st.site.lonDeg, new Date());
+    this.log('info', `ALIGN. HOME : retour à la position Home enregistrée puis SYNC — ${
+      geo.polar ? 'polaire' : 'tube horizontal'} alt ${geo.altDeg.toFixed(1)}° az ${geo.azDeg.toFixed(0)}°`);
+    const gen = ++this.relayGen; // single-flight : tue tout GOTO/relais en cours
+    useScopeStore.getState().setGotoRunning(true);
+    this.cmdPhase = true;
+    try {
+      const status = await this.gotoRaDecRelay(
+        rd0.raDeg, rd0.decDeg, 'mute', new Date(), gen, {park: true});
+      if (status !== 'ok') return 'nogoto';
+      // Coordonnées de la position Home RECALCULÉES À L'ARRIVÉE (le ciel a
+      // tourné pendant le trajet — le SYNC doit décrire OÙ LE TUBE EST).
+      const rd1 = altAzToRaDec(geo.altDeg, geo.azDeg, st.site.latDeg, st.site.lonDeg, new Date());
+      const ok = await this.syncRaDec(rd1.raDeg, rd1.decDeg);
+      if (ok) {
+        this.log('info', 'ALIGN. HOME : raquette synchronisée sur la position Home — altitude (:Ga#) fiable pour les butées');
+      } else {
+        this.log('error', 'ALIGN. HOME : SYNC refusé ou muet — les butées garderont la course théorique du preset');
+      }
+      return ok ? 'ok' : 'nosync';
+    } finally {
+      this.cmdPhase = false;
+      useScopeStore.getState().setGotoRunning(false);
+    }
+  }
+
   /* ---------- polling position (synchro temps réel) ---------- */
 
   /** Cadence du polling : 500 ms (synchro live) ou 2000 ms (fond). */

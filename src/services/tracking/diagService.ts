@@ -14,6 +14,14 @@
  *   6. drivetrain — train d'engrenages : régularité du taux, oscillation
  *                   crête-à-crête, détection de blocage (chien de garde
  *                   butée : la jambe s'arrête net si le tube bloque)
+ *   0. home       — v2.9.6 : si une position Home ⌂ est enregistrée
+ *                   (onglet Alignement), GOTO Home (relais mode parc) puis
+ *                   SYNC sur les coordonnées RECALCULÉES à l'arrivée — la
+ *                   raquette croit sincèrement que le tube est à la Home
+ *                   physique → :Ga# fiable, butées calculées sur une
+ *                   altitude RÉELLE (« imposer un alignement sur home
+ *                   avant de se lancer et prendre cette position en
+ *                   compte pour les butées de test »)
  *   7. limits     — min/max élévation : approche en DEUX ÉTAGES (vitesse
  *                   find puis vitesse center) jusqu'à ARRÊT SOUTENU du tube
  *                   confirmé au gyro, course bornée par le preset de
@@ -111,7 +119,7 @@ export interface DiagReport {
 export interface DiagEvent {
   test: DiagTestId;
   /** Phase libre pour l'UI (mappée sur l'i18n côté composant). */
-  phase: 'start' | 'bias' | 'move' | 'settle' | 'profile' | 'up' | 'down' | 'slow' | 'travel' | 'passive' | 'done';
+  phase: 'start' | 'bias' | 'move' | 'settle' | 'profile' | 'up' | 'down' | 'slow' | 'travel' | 'passive' | 'home' | 'done';
   dir?: PulseDir;
   /** Progression globale 0..1 (durées estimées pondérées). */
   progress: number;
@@ -120,7 +128,9 @@ export interface DiagEvent {
 /** Durées estimées (s) — progression et affichage UI. (limits revu à la
  *  baisse v2.3.0 : l'étage à vitesse maximale raccourcit réellement le test.) */
 export const DIAG_TEST_DURATIONS_S: Record<DiagTestId, number> = {
-  pre: 5,
+  // pre 20 (v2.9.6) : intègre le préambule Home (GOTO ⌂ + SYNC, ~30 s
+  // quand un point Home est enregistré — sinon le poids est rendu).
+  pre: 20,
   calib: 32,
   ratio: 24,
   backlash: 34,
@@ -141,10 +151,13 @@ const LIMIT_TICK_MS = 400;
 const LIMIT_WINDOW_MS = 2000;
 /** Ignorer le démarrage moteur (accélération) avant toute décision. */
 const LIMIT_SPINUP_SKIP_MS = 1500;
-/** Approche lente : garde maximale de l'étage center. */
-const LIMIT_SLOW_GUARD_S = 90;
-/** Attente d'arrivée GOTO (max, s). */
-const GOTO_ARRIVE_GUARD_S = 180;
+/** Approche lente : garde maximale de l'étage center (v2.9.6 : 60 s —
+ *  à 0,05°/s cela couvre 3° de fin d'approche, largement suffisant ; une
+ *  garde trop longue ne se voit que quand la détection échoue). */
+const LIMIT_SLOW_GUARD_S = 60;
+/** Attente d'arrivée GOTO (max, s) — v2.9.6 : 120 s (le GOTO v2.9.4 part
+ *  en ~1 s ; l'attente ne se voit plus que sur raquette muette). */
+const GOTO_ARRIVE_GUARD_S = 120;
 
 function connGuard(): boolean {
   return useScopeStore.getState().connStatus === 'connected' && autostar.isConnected();
@@ -197,6 +210,22 @@ class DiagRunner {
     this.suiteFindRate = null;
     this.suiteSlewRate = null;
 
+    /* -- 0. HOME (v2.9.6 — « imposer un alignement sur home avant de se
+       lancer et prendre cette position en compte pour les butées de
+       test ») : GOTO de la position Home ⌂ enregistrée (relais mode parc)
+       puis SYNC sur les coordonnées RECALCULÉES à l'arrivée. Sans point
+       Home (ou protocole sans relais) : préambule silencieusement ignoré. */
+    let homeAlign: number | null = null;
+    {
+      const homePoint = useTelemetryStore.getState().points.find((p) => p.home);
+      if (homePoint && connGuard() && !this.aborted) {
+        emit('pre', 'home');
+        const r = await this.safe(() => autostar.alignToHome());
+        homeAlign = r === 'ok' ? 1 : 0;
+        elapsedWeight += 30; // le GOTO Home ajoute du temps réel au pré-test
+      }
+    }
+
     /* -- 1. PRE ------------------------------------------------------ */
     {
       const t0 = now();
@@ -227,7 +256,10 @@ class DiagRunner {
       const status: DiagStatus = !okLink ? 'fail'
         : !gyroOk ? 'fail'
         : (noise ?? 0) > 0.05 || (biasMag ?? 0) > 0.5 ? 'warn' : 'ok';
-      finishTest('pre', t0, status, {biasMagDegPerSec: biasMag, ambientNoiseDegPerSec: noise});
+      finishTest('pre', t0, status, {
+        biasMagDegPerSec: biasMag, ambientNoiseDegPerSec: noise,
+        homeAlign, // 1 = GOTO Home + SYNC ok · 0 = tenté/échoué · null = pas de Home
+      });
     }
 
     /* -- 2. CALIB (taux réels 4 directions → raquette) --------------- */

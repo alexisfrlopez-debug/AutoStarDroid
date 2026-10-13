@@ -450,11 +450,15 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
   /*   Unité (PU/CT)       : wIndex = (unitId << 8) | interface VC   */
   /* ------------------------------------------------------------ */
 
-  /** GET sur l'interface VS (probe) — wIndex = vsCtrlIfNum (v2.9.3). */
+  /** GET sur l'interface VS (probe) — wIndex = vsCtrlIfNum (v2.9.3).
+   *  v2.9.6 : une réponse COURTE est VALIDE (wLength = un MAXIMUM — le
+   *  firmware renvoie SA longueur de structure, ex. 26 octets quand on
+   *  demande 48 ; l'ancien test n == len rejetait ces réponses légitimes
+   *  et comptait toutes les caméras à structure plus courte comme muettes). */
   private fun ctrlGetVs(conn: UsbDeviceConnection, cs: Int, req: Int, len: Int): ByteArray? {
     val buf = ByteArray(len)
     val n = conn.controlTransfer(0xA1, req, (cs shl 8) and 0xFFFF, vsCtrlIfNum and 0xFF, buf, len, 300)
-    return if (n == len) buf else null
+    return if (n > 0) buf else null
   }
 
   /** SET sur l'interface VS (probe/commit) — wIndex = vsCtrlIfNum. */
@@ -614,25 +618,48 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
       //  2. BASE : GET_CUR prérempli (certains firmwares refusent une
       //     structure tout-zéro) PUIS structure canonique propre — le
       //     prérempli peut AUSSI être refusé (état interne douteux).
-      //  3. INTERFACE : le contrôle va sur l'interface VS du parsing
-      //     (spec UVC) ; si elle refuse tout, retenter sur l'interface
-      //     PORTEUSE du scan SDK (epIfNum) — des descripteurs exotiques
-      //     déclarent la VS ailleurs.
+      //  3. INTERFACE (v2.9.6) : le contrôle va sur l'interface VS du
+      //     parsing (spec UVC) ; si elle refuse tout, retenter sur
+      //     l'interface PORTEUSE du scan SDK (epIfNum) puis sur la
+      //     VideoControl (vcIfNum, dernier recours) — des descripteurs
+      //     exotiques déclarent la VS ailleurs.
+      //  4. CLAIM FORCÉ (v2.9.6) : claimInterface(force=true) avec résultat
+      //     vérifié — un pilote noyau (uvcvideo des Android 14/15) qui tient
+      //     l'interface faisait échouer TOUTES les requêtes class
+      //     recipient-interface (le dump « lens=26,34,48, curOK=0 ») alors
+      //     que les requêtes standard (descripteurs) passaient.
+      //  5. RÉPONSES COURTES (v2.9.6) : GET_CUR accepté dès n>0 (wLength est
+      //     un maximum — le firmware renvoie SA longueur de structure).
+      //  6. COMMIT DIRECT (v2.9.6) : si un SET_CUR(PROBE) a été accepté mais
+      //     le GET_CUR reste muet, COMMITer la structure acceptée quand même.
       var probeLen = -1
       var got: ByteArray? = null
+      var lastAccepted: ByteArray? = null // v2.9.6 : dernière structure SET_CUR acceptée
       val triedLens = LinkedHashSet<Int>()
       var curOk = 0
+      var setOk = 0 // v2.9.6 : nb de SET_CUR(PROBE) acceptés
+      val claimRes = LinkedHashMap<Int, Int>() // v2.9.6 : ifnum → 1 claimé / 0 REFUSÉ
       val ctrlIfs = LinkedHashSet<Int>()
       ctrlIfs.add(desc.vsIfNum)
       if (epIfNum != desc.vsIfNum) ctrlIfs.add(epIfNum)
+      // v2.9.6 : DERNIER RECOURS — l'interface VideoControl (0). Non spec
+      // pour le probe, mais des firmwares exotiques y répondent ; un STALL
+      // s'efface seul au SETUP suivant, l'essai est sans danger.
+      if (desc.vcIfNum >= 0) ctrlIfs.add(desc.vcIfNum)
       probeLoop@ for (ifc in ctrlIfs) {
         vsCtrlIfNum = ifc
-        // claim best-effort de l'interface (alt 0) — même précaution que
-        // libuvc ; sans effet si le noyau la référence déjà
+        // CLAIM — v2.9.6 : le RÉSULTAT est désormais vérifié et le claim est
+        // FORCÉ (détache un pilote noyau éventuel — uvcvideo est présent sur
+        // beaucoup d'Android 14/15 et fait alors échouer TOUTES les requêtes
+        // class recipient-interface côté usbfs : standard GET_DESCRIPTOR
+        // marche, GET_LEN/GET_CUR/SET_CUR « stallent » — exactement le
+        // dump lens=26,34,48 + curOK=0 du terrain). Le flux le faisait déjà
+        // (force=true) ; le probe, non — c'était l'incohérence.
+        var claimed = -1
         for (k in 0 until dev.interfaceCount) {
           val f = dev.getInterface(k)
           if (f.id == ifc && f.alternateSetting == 0) {
-            try { conn.claimInterface(f, false) } catch (_: Exception) {}
+            claimed = if (try { conn.claimInterface(f, true) } catch (_: Exception) { false }) 1 else 0
             // SET_INTERFACE(alt 0) EXPLICITE (v2.9.4, pratique libuvc) :
             // une interface VS restée sur un alt > 0 d'une session
             // précédente fait refuser le probe/commit par certains
@@ -643,6 +670,7 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
             break
           }
         }
+        if (claimed >= 0) claimRes[ifc] = claimed
         val lens = ArrayList<Int>()
         ctrlGetLen(conn)?.let { lens.add(it) }
         for (c in PROBE_LENS_FALLBACK) if (!lens.contains(c)) lens.add(c)
@@ -659,6 +687,8 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
             if (len >= 8) putLe32(cand, 4, intervalVal)
             if (ctrlSetVs(conn, CS_PROBE, cand)) {
               probeLen = len
+              setOk += 1
+              lastAccepted = cand.copyOf()
               // GET_CUR post-SET ×3 — certains firmwares répondent au 2e tour
               for (t in 0 until 3) {
                 got = ctrlGetVs(conn, CS_PROBE, 0x81, len)
@@ -669,17 +699,31 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
           }
         }
       }
+      // v2.9.6 — REPLI « COMMIT DIRECT » : certains firmwares acceptent le
+      // SET_CUR(PROBE) mais ne répondent JAMAIS au GET_CUR (curOK=0). Si une
+      // structure a été ACCEPTÉE, tenter le COMMIT avec celle-ci — un COMMIT
+      // accepté ouvre le flux même sans lecture du probe (les champs que le
+      // firmware aurait remplis — dwMaxVideoFrameSize/dwMaxPayload — sont
+      // reconstruits plus bas à partir des descripteurs).
+      if (got == null && lastAccepted != null) {
+        val commitTry = lastAccepted!!.copyOf()
+        if (ctrlSetVs(conn, CS_COMMIT, commitTry)) {
+          got = lastAccepted
+          probeLen = lastAccepted!!.size
+        }
+      }
       if (got == null) {
         conn.close()
+        val claimTxt = claimRes.entries.joinToString(",") { "${it.key}:${it.value}" }
         return promise.reject("UVC",
             if (probeLen >= 0)
-              "PROBE accepté (len=%d) mais GET_CUR muet (curOK=%d, fmt=%d, frame=%d, interval=%d, ifVS=%d, epIf=%d)"
-                  .format(Locale.US, probeLen, curOk, format.index, frame.index,
-                      intervalVal, desc.vsIfNum, epIfNum)
+              "PROBE accepté (len=%d) mais GET_CUR muet (curOK=%d, setOK=%d, claim=%s, fmt=%d, frame=%d, interval=%d, ifVS=%d, vcIf=%d, epIf=%d)"
+                  .format(Locale.US, probeLen, curOk, setOk, claimTxt, format.index, frame.index,
+                      intervalVal, desc.vsIfNum, desc.vcIfNum, epIfNum)
             else
-              "PROBE refusé par la caméra (lens=%s, curOK=%d, fmt=%d, frame=%d, interval=%d, ifVS=%d, epIf=%d)"
-                  .format(Locale.US, triedLens.joinToString(","), curOk, format.index, frame.index,
-                      intervalVal, desc.vsIfNum, epIfNum))
+              "PROBE refusé par la caméra (lens=%s, curOK=%d, setOK=%d, claim=%s, fmt=%d, frame=%d, interval=%d, ifVS=%d, vcIf=%d, epIf=%d)"
+                  .format(Locale.US, triedLens.joinToString(","), curOk, setOk, claimTxt, format.index, frame.index,
+                      intervalVal, desc.vsIfNum, desc.vcIfNum, epIfNum))
       }
       // ⚠️ offsets VS_PROBE_CONTROL : dwMaxVideoFrameSize à 18,
       // dwMaxPayloadTransferSize à 22 (v2.8.0 lisait 20/24 — décalés)
