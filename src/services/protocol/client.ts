@@ -20,12 +20,15 @@ import type {ScopeModelId} from '../../store/settingsStore';
 import {useSettingsStore} from '../../store/settingsStore';
 import {useScopeStore} from '../../store/scopeStore';
 import {useMotorCalibStore} from '../../store/motorCalibStore';
+import {useTelemetryStore} from '../../store/telemetryStore';
 import {
   raDeltaDeg, relayDecision, relaySignWasWrong, relayAltBlocked, relayLearnRate,
+  RELAY_ALT_MARGIN_DEG,
   type RelayRates, type RelaySigns, type RelaySpeed,
 } from '../astro/gotorelay';
 import {DEFAULT_SKY_RATES} from '../astro/tracking';
-import {raDecToAltAz} from '../astro/coords';
+import {raDecToAltAz, altAzToRaDec} from '../astro/coords';
+import {homeGeometry} from '../astro/telemetry';
 import {activePreset} from '../mounts/catalog';
 import {sleep} from '../util';
 
@@ -920,11 +923,20 @@ export class AutostarClient implements DriverClient {
    * stopAll systématique en sortie. Notifie onGotoStart/onGotoArrival pour
    * le contrôle croisé télémétrie/moteurs et le réglage fin (v2.3.0/v2.2.0).
    */
-  private async gotoRaDecRelay(raDeg: number, decDeg: number, cause: GotoStatus, horizonNow?: Date, gen = this.relayGen): Promise<GotoStatus> {
+  private async gotoRaDecRelay(
+    raDeg: number, decDeg: number, cause: GotoStatus,
+    horizonNow?: Date, gen = this.relayGen,
+    opts?: {park?: boolean},
+  ): Promise<GotoStatus> {
+    const park = opts?.park === true;
     const log = (m: string) => useScopeStore.getState().pushLog('info', m);
     const logErr = (m: string) => useScopeStore.getState().pushLog('error', m);
-    const causeTxt = cause === 'noLink' ? 'liaison perdue' : cause === 'refused' ? 'cible refusée' : 'raquette muette';
-    logErr(`GO TO direct impossible (${causeTxt}) — RELAIS : pilotage moteur en boucle fermée`);
+    if (park) {
+      log('PARC : retour à la position Home enregistrée (onglet Alignement) — pilotage moteur en boucle fermée');
+    } else {
+      const causeTxt = cause === 'noLink' ? 'liaison perdue' : cause === 'refused' ? 'cible refusée' : 'raquette muette';
+      logErr(`GO TO direct impossible (${causeTxt}) — RELAIS : pilotage moteur en boucle fermée`);
+    }
 
     // 1. liaison : un noLink laisse la reconnexion automatique finir (25 s)
     if (cause === 'noLink' && !(await this.waitForLink(25))) {
@@ -936,21 +948,30 @@ export class AutostarClient implements DriverClient {
     //    le calcul d'altitude du téléphone le remplace, désormais pour les
     //    DEUX butées du preset (avant : horizon seul — « le télescope monte
     //    jusqu'à la butée et cherche à continuer de monter »).
+    //    MODE PARC (v2.9.5) : la Home alt-az est TUBE HORIZONTAL (alt 0°) —
+    //    refusée par la garde normale (marge 2°) comme par :MS (« sous
+    //    l'horizon ») ; en parc on ne refuse PAS la cible, la garde basse de
+    //    la boucle devient le mécanisme d'arrêt (position Home atteinte).
     const st = useSettingsStore.getState();
     const site = st.site;
     const preset = activePreset(
       st.mountBrandId, st.mountModelId, st.customMount,
       useScopeStore.getState().model, st.mountPreset);
     const alt = raDecToAltAz(raDeg, decDeg, site.latDeg, site.lonDeg, horizonNow ?? new Date()).altDeg;
-    if (alt < 0) {
-      log(`RELAIS : cible sous l'horizon (alt ${alt.toFixed(0)}°) — refus`);
+    if (!park) {
+      if (alt < 0) {
+        log(`RELAIS : cible sous l'horizon (alt ${alt.toFixed(0)}°) — refus`);
+        return 'belowHorizon';
+      }
+      const tgtBlock = relayAltBlocked(alt, preset.minAltDeg, preset.maxAltDeg);
+      if (tgtBlock) {
+        log(`RELAIS : cible hors butées de la monture ${preset.label} ` +
+            `(alt ${alt.toFixed(0)}° — ${tgtBlock === 'high' ? `butée haute ${preset.maxAltDeg}` : `butée basse ${preset.minAltDeg}`}°) — refus`);
+        return 'noObject';
+      }
+    } else if (alt < -5) {
+      log(`PARC : cible nettement sous l'horizon (alt ${alt.toFixed(0)}°) — refus`);
       return 'belowHorizon';
-    }
-    const tgtBlock = relayAltBlocked(alt, preset.minAltDeg, preset.maxAltDeg);
-    if (tgtBlock) {
-      log(`RELAIS : cible hors butées de la monture ${preset.label} ` +
-          `(alt ${alt.toFixed(0)}° — ${tgtBlock === 'high' ? `butée haute ${preset.maxAltDeg}` : `butée basse ${preset.minAltDeg}`}°) — refus`);
-      return 'noObject';
     }
 
     // 3. position initiale — sans position lisible, rien n'est possible
@@ -1089,6 +1110,18 @@ export class AutostarClient implements DriverClient {
           if ((d.dirs.raDir && stalledStreak.ra >= 3) ||
               (d.dirs.decDir && stalledStreak.dec >= 3)) {
             await this.stopAll().catch(() => undefined);
+            // MODE PARC (v2.9.5) : la monture qui REPOSE sur sa butée (tube
+            // horizontal, plus bas impossible) EST à la position Home — un
+            // reste < 1° clos le parc en succès au lieu d'une erreur.
+            if (park) {
+              const remain = Math.max(Math.abs(d.remainRaDeg), Math.abs(d.remainDecDeg));
+              if (remain < 1) {
+                log(`PARC : position Home atteinte (la monture repose sur sa butée — reste ${(remain * 60).toFixed(0)}′)`);
+                this.ownMoveUntil = Date.now() + 1200;
+                this.watchSlewEnd();
+                return 'ok';
+              }
+            }
             const stuckAxis = (d.dirs.raDir && stalledStreak.ra >= 3) ? 'AD' : 'DEC';
             logErr(`RELAIS interrompu : axe ${stuckAxis} figé malgré les impulsions (butée atteinte ou moteur sans effet)`);
             this.ownMoveUntil = Date.now() + 1200;
@@ -1108,10 +1141,20 @@ export class AutostarClient implements DriverClient {
           pos.decDeg = newDec;
           // garde butées CONTINUE (v2.9.2) : la position s'évalue en altitude
           // à chaque itération — un pointage erroné ne doit JAMAIS pousser la
-          // monture dans sa course mécanique
+          // monture dans sa course mécanique. MODE PARC (v2.9.5) : la marge
+          // basse est ANNULÉE (la Home alt-az EST l'horizontale) et l'arrêt
+          // bas est un SUCCÈS — la position Home est atteinte.
           const altCur = raDecToAltAz(
             pos.raDeg, pos.decDeg, site.latDeg, site.lonDeg, new Date()).altDeg;
-          const blk = relayAltBlocked(altCur, preset.minAltDeg, preset.maxAltDeg);
+          const minGuard = park ? preset.minAltDeg - RELAY_ALT_MARGIN_DEG : preset.minAltDeg;
+          const blk = relayAltBlocked(altCur, minGuard, preset.maxAltDeg);
+          if (blk === 'low' && park) {
+            await this.stopAll().catch(() => undefined);
+            log(`PARC : position Home atteinte (alt ${altCur.toFixed(1)}° — tube à l'horizontale)`);
+            this.ownMoveUntil = Date.now() + 1200;
+            this.watchSlewEnd(); // notif d'arrivée (réglage fin/contrôle croisé)
+            return 'ok';
+          }
           if (blk) {
             await this.stopAll().catch(() => undefined);
             logErr(`RELAIS interrompu : butée ${blk === 'high' ? 'haute' : 'basse'} ` +
@@ -1358,12 +1401,55 @@ export class AutostarClient implements DriverClient {
     await this.drv.reticleAdjust(this, delta);
   }
 
-  /** Parc (Meade :hP#) — non disponible hors Meade en v2.6.0. */
+  /** Parc RAQUETTE (:hP# — position mémorisée dans le menu Park de la
+   *  raquette elle-même) ; pour revenir à la « Position Home » enregistrée
+   *  dans l'onglet Alignement, utiliser parkToHome() (v2.9.5). */
   async park() {
     if (!this.drv.caps.park || !this.drv.park) {
       throw new TransportError('Parc non disponible sur ce protocole');
     }
     await this.drv.park(this);
+  }
+
+  /** PARC VERS LA POSITION HOME (v2.9.5) — « quand je clique sur parc, le
+   *  télescope ne revient pas sur la position home que j'ai enregistré dans
+   *  l'onglet alignement ». L'ancien parc (:hP#) vise la position mémorisée
+   *  DANS LA RAQUETTE (menu Park, rarement réglée) — jamais le point ⌂ de
+   *  l'app.
+   *
+   *  Avec un point Home enregistré : la géométrie Home (alt/az selon le
+   *  mode d'alignement et la latitude) est RECONVERTIE en AD/Dec À L'INSTANT
+   *  PRÉSENT (la AD/Dec stockée à l'enregistrement ne vaut que pour cet
+   *  instant — l'horizontale tourne avec le ciel), puis GOTO via le RELAIS
+   *  en MODE PARC : la cible à l'horizon (Home alt-az = tube horizontal)
+   *  serait refusée par le chemin direct :Sr/:Sd/:MS ET par la garde basse
+   *  normale du relais (marge 2°). Sans point Home : repli :hP# (Meade).
+   *  Renvoie le vecteur utilisé + le statut GOTO (UI = gotoErrorText). */
+  async parkToHome(): Promise<{via: 'home' | 'handbox'; status: GotoStatus}> {
+    const home = useTelemetryStore.getState().points.find((p) => p.home) ?? null;
+    if (!home || !this.drv.caps.relay) {
+      // Sans point Home (ou protocole sans relais) : parc raquette historique
+      if (!this.drv.caps.park || !this.drv.park) {
+        throw new TransportError('Parc non disponible sur ce protocole');
+      }
+      await this.drv.park(this);
+      return {via: 'handbox', status: 'ok'};
+    }
+    const st = useSettingsStore.getState();
+    const geo = homeGeometry(useScopeStore.getState().alignMode, st.site.latDeg);
+    const rd = altAzToRaDec(geo.altDeg, geo.azDeg, st.site.latDeg, st.site.lonDeg, new Date());
+    this.log('info', `PARC : position Home (${geo.polar ? 'polaire' : 'tube horizontal'} alt ${geo.altDeg.toFixed(1)}° az ${geo.azDeg.toFixed(0)}°) — GOTO en cours`);
+    const gen = ++this.relayGen; // single-flight : tue tout GOTO/relais en cours
+    useScopeStore.getState().setGotoRunning(true);
+    this.cmdPhase = true;
+    try {
+      const status = await this.gotoRaDecRelay(
+        rd.raDeg, rd.decDeg, 'mute', new Date(), gen, {park: true});
+      return {via: 'home', status};
+    } finally {
+      this.cmdPhase = false;
+      useScopeStore.getState().setGotoRunning(false);
+    }
   }
 
   /* ---------- polling position (synchro temps réel) ---------- */

@@ -41,6 +41,13 @@ interface ScopeState {
    *  zéros initiaux ne doivent pas être affichés comme si c'étaient la
    *  position de la raquette). */
   hasPos: boolean;
+  /** Horodatage de la DERNIÈRE position lue (v2.9.5) — la carte du ciel
+   *  n'accepte un recentrage sur le télescope que si la position est fraîche
+   *  (raquette muette pendant un slew = position périmée, ne pas y sauter). */
+  posAt: number;
+  /** Horodatage du dernier choix de cible (v2.9.5) — la carte du ciel attend
+   *  sur une cible récente quand le télescope est muet (slew direct). */
+  targetAt: number;
   targetRaDeg: number | null;
   targetDecDeg: number | null;
   targetName: string;
@@ -111,6 +118,8 @@ const initial = {
   raDeg: 0,
   decDeg: 0,
   hasPos: false,
+  posAt: 0,
+  targetAt: 0,
   targetRaDeg: null as number | null,
   targetDecDeg: null as number | null,
   targetName: '',
@@ -140,10 +149,10 @@ export const useScopeStore = create<ScopeState>((set) => ({
   setModel: (model) => set({model}),
   setDriverId: (driverId) => set({driverId}),
   setFirmware: (fwProduct, fwVersion, fwModel) => set({fwProduct, fwVersion, fwModel}),
-  setPosition: (raDeg, decDeg) => set({raDeg, decDeg, hasPos: true}),
+  setPosition: (raDeg, decDeg) => set({raDeg, decDeg, hasPos: true, posAt: Date.now()}),
   setHasPos: (hasPos) => set({hasPos}),
   setTarget: (targetRaDeg, targetDecDeg, targetName) =>
-    set({targetRaDeg, targetDecDeg, targetName}),
+    set({targetRaDeg, targetDecDeg, targetName, targetAt: Date.now()}),
   setSpeed: (speed) => set({speed}),
   setAlignMode: (alignMode) => set({alignMode}),
   setHbSync: (hbSync) => set({hbSync}),

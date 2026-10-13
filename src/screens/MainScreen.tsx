@@ -4,6 +4,7 @@ import {ScrollView, View, Text, Alert} from 'react-native';
 import {useT} from '../i18n';
 import {useScopeStore} from '../store/scopeStore';
 import {useSettingsStore} from '../store/settingsStore';
+import {useTelemetryStore} from '../store/telemetryStore';
 import {autostar, gotoErrorText} from '../services/protocol/client';
 import {raDecToAltAz} from '../services/astro/coords';
 import {raDegToHMS, decDegToDMS, lstDeg} from '../services/astro/time';
@@ -55,6 +56,31 @@ export function MainScreen({navigation}: {navigation: {navigate: (s: string) => 
 
   const connected = connStatus === 'connected';
 
+  /* ---------- PARC (v2.9.5) : retour à la position Home (Alignement) ---------- */
+  const homePoint = useTelemetryStore((s) => s.points.find((p) => p.home) ?? null);
+  const gotoRunning = useScopeStore((s) => s.gotoRunning);
+  const [parking, setParking] = useState(false);
+  const park = async () => {
+    setParking(true);
+    try {
+      const {via, status} = await autostar.parkToHome();
+      const msg = gotoErrorText(status, {
+        belowHorizon: t.objects.belowHorizon, empty: t.objects.empty,
+        gotoNoLink: t.errors.gotoNoLink, gotoMute: t.errors.gotoMute, refused: t.errors.refused,
+        relayPartial: t.errors.relayPartial,
+      });
+      if (msg) {
+        Alert.alert(t.common.error, msg);
+      } else if (via === 'home') {
+        Alert.alert(t.common.success, t.main.parkHomeOk);
+      }
+    } catch (e) {
+      Alert.alert(t.common.error, (e as Error).message);
+    } finally {
+      setParking(false);
+    }
+  };
+
   return (
     <ScrollView style={{flex: 1, backgroundColor: c.bg}} contentContainerStyle={{padding: 12, paddingBottom: 40}}>
       <StatusHeader onTap={() => navigation.navigate('Connect')} />
@@ -98,8 +124,14 @@ export function MainScreen({navigation}: {navigation: {navigate: (s: string) => 
           variant="primary" style={{flex: 1, marginRight: 6}} />
         <Btn label={t.main.syncPhone} onPress={syncPhone} disabled={!connected} style={{flex: 1, marginLeft: 6}} />
       </View>
-      <Btn label={t.main.park} onPress={() => autostar.park().catch(() => {})} disabled={!connected || !autostar.drv.caps.park}
+      <Btn
+        label={parking ? t.main.parking : homePoint ? t.main.parkHome : t.main.park}
+        onPress={() => void park()}
+        disabled={!connected || parking || gotoRunning || (!homePoint && !autostar.drv.caps.park)}
         variant="ghost" style={{marginTop: 10}} />
+      <Text style={{color: c.textFaint, fontSize: 11, textAlign: 'center', marginTop: 4}}>
+        {homePoint ? t.main.parkHomeHint : t.main.parkNoHome}
+      </Text>
       <View style={{flexDirection: 'row', marginTop: 10}}>
         <Btn label={t.tabs.handbox} onPress={() => navigation.navigate('Handbox')} style={{flex: 1, marginRight: 6}} />
         <Btn label={t.tabs.console} onPress={() => navigation.navigate('Console')} style={{flex: 1, marginLeft: 6}} />

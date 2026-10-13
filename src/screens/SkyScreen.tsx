@@ -43,7 +43,8 @@ import {autostar, gotoErrorText} from '../services/protocol/client';
 import {raDecToAltAz} from '../services/astro/coords';
 import {raDegToHMS, decDegToDMS} from '../services/astro/time';
 import {
-  projectView, fovCircleRadiusPx, panCenter, layoutLabels,
+  projectView, fovCircleRadiusPx, panCenter, layoutLabels, skyCenter,
+  SKY_SCOPE_FRESH_MS, SKY_TARGET_HOLD_MS,
   type ViewGeometry, type PlacedItem, type LabelLayout,
 } from '../services/astro/skyview';
 import {
@@ -87,6 +88,8 @@ export function SkyScreen({navigation}: {navigation?: {navigate: (s: string) => 
   const targetRa = useScopeStore((st) => st.targetRaDeg);
   const targetDec = useScopeStore((st) => st.targetDecDeg);
   const gotoRunning = useScopeStore((st) => st.gotoRunning);
+  const posAt = useScopeStore((st) => st.posAt);
+  const targetAt = useScopeStore((st) => st.targetAt);
   const setTarget = useScopeStore((st) => st.setTarget);
   const setTrackTarget = useTrackingStore((st) => st.setTarget);
   const skyMountPose = useSettingsStore((st) => st.skyMountPose);
@@ -102,6 +105,12 @@ export function SkyScreen({navigation}: {navigation?: {navigate: (s: string) => 
   const [tick, setTick] = useState(0);
   const [size, setSize] = useState({w: 320, h: 320});
   const [manual, setManual] = useState<{altDeg: number; azDeg: number} | null>(null);
+  /** SUIVI DU TÉLESCOPE (v2.9.5) : actif par défaut — la carte colle à la
+   *  position de la monture (« suit le chercheur »). Le glisser le COUPE
+   *  (exploration libre, marqueur ✛ du télescope visible) ; un GOTO ou le
+   *  bouton « ↺ Recentrer » le réarme. v2.9.4 faisait l'inverse (le pan
+   *  gagnait jusqu'au GOTO suivant) — la carte paraissait figée. */
+  const [follow, setFollow] = useState(true);
   const [phoneOrient, setPhoneOrient] = useState<Orientation | null>(null);
   const [selected, setSelected] = useState<DisplayObject | null>(null);
 
@@ -118,46 +127,50 @@ export function SkyScreen({navigation}: {navigation?: {navigate: (s: string) => 
     return rel;
   }, [connStatus, hasPos]);
 
-  // Pendant un GOTO le suivi du télescope reprend AUTOMATIQUEMENT : la
-  // carte doit suivre les moteurs (contrôle croisé) — le pan manuel est
-  // oublié. (v2.9.4)
+  // GOTO : le suivi reprend AUTOMATIQUEMENT et la carte part sur la CIBLE
+  // (pas de saut vers la position périmée du télescope) — le pan manuel est
+  // oublié. (v2.9.4, recentrage cible v2.9.5)
   useEffect(() => {
-    if (gotoRunning) setManual(null);
+    if (gotoRunning) {
+      setManual(null);
+      setFollow(true);
+    }
   }, [gotoRunning]);
 
-  // Centre de la carte : PAN MANUEL (v2.9.4) > télescope > téléphone > défaut
+  // Centre de la carte (v2.9.5 — décision pure skyCenter) : exploration
+  // manuelle > cible (GOTO/cible récente) > télescope FRAÎS > téléphone.
   const mountCfg: PhoneMountConfig = useMemo(
     () => ({pose: skyMountPose, angle: skyMountAngle, position: skyMountPosition}),
     [skyMountPose, skyMountAngle, skyMountPosition],
   );
   const center = useMemo(() => {
     const nowD = new Date();
-    // v2.9.4 — « la carte du ciel est figée, je ne peux pas la faire glisser » :
-    // le centre était FORCÉ à la position du télescope dès qu'elle est lue
-    // (chaque seconde + chaque itération de relais) — le pan manuel était
-    // écrasé avant d'être visible. Désormais le glisser GAGNE : la carte
-    // reste où l'utilisateur l'a posée ; le suivi reprend par le bouton
-    // « ↺ Recentrer » ou automatiquement à chaque GOTO (au-dessus).
-    if (manual && !gotoRunning) {
-      return {altDeg: manual.altDeg, azDeg: manual.azDeg, src: 'manual' as const};
-    }
-    if (connStatus === 'connected' && hasPos) {
-      const aa = raDecToAltAz(raDeg, decDeg, site.latDeg, site.lonDeg, nowD);
-      return {altDeg: aa.altDeg, azDeg: aa.azDeg, src: 'scope' as const};
-    }
-    if (phoneOrient && !manual) {
+    const toAA = (ra: number, dec: number) =>
+      raDecToAltAz(ra, dec, site.latDeg, site.lonDeg, nowD);
+    const scopeAA = connStatus === 'connected' && hasPos ? toAA(raDeg, decDeg) : null;
+    const targetAA = targetRa != null && targetDec != null ? toAA(targetRa, targetDec) : null;
+    let phoneAA: {altDeg: number; azDeg: number} | null = null;
+    if (phoneOrient) {
       const tube = tubeAltAzFromOrientation(phoneOrient, mountCfg, declinationDeg);
       if (tube) {
-        return {
-          altDeg: Math.max(1, Math.min(89, tube.altDeg)),
-          azDeg: tube.azDeg,
-          src: 'phone' as const,
-        };
+        phoneAA = {altDeg: Math.max(1, Math.min(89, tube.altDeg)), azDeg: tube.azDeg};
       }
     }
-    return {altDeg: manual?.altDeg ?? 35, azDeg: manual?.azDeg ?? 180, src: manual ? ('manual' as const) : ('phone' as const)};
+    return skyCenter({
+      follow,
+      manual,
+      gotoRunning,
+      target: targetAA,
+      targetRecent: Date.now() - targetAt < SKY_TARGET_HOLD_MS,
+      scope: scopeAA,
+      scopeFresh: Date.now() - posAt < SKY_SCOPE_FRESH_MS,
+      phone: phoneAA,
+      fallback: {altDeg: 35, azDeg: 180},
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tick, connStatus, hasPos, raDeg, decDeg, site.latDeg, site.lonDeg, phoneOrient, manual, gotoRunning, declinationDeg, mountCfg]);
+  }, [tick, follow, manual, gotoRunning, targetRa, targetDec, targetAt, posAt,
+      connStatus, hasPos, raDeg, decDeg, site.latDeg, site.lonDeg, phoneOrient,
+      declinationDeg, mountCfg]);
 
   const geom: ViewGeometry = useMemo(() => ({
     centerAltDeg: center.altDeg,
@@ -189,6 +202,18 @@ export function SkyScreen({navigation}: {navigation?: {navigate: (s: string) => 
     return p.visible ? p : null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetRa, targetDec, tick, geom, site.latDeg, site.lonDeg]);
+
+  // MARQUEUR DU TÉLESCOPE (v2.9.5) : croix cyan à la position réelle de la
+  // monture — visible même en exploration manuelle (« ne suit pas le
+  // chercheur » : l'utilisateur voyait une carte immobile SANS savoir où
+  // pointait le télescope). En suivi il recouvre le réticule central.
+  const scopeMark = useMemo(() => {
+    if (connStatus !== 'connected' || !hasPos) return null;
+    const aa = raDecToAltAz(raDeg, decDeg, site.latDeg, site.lonDeg, new Date());
+    const [p] = projectView([{altDeg: aa.altDeg, azDeg: aa.azDeg}], geom);
+    return p.visible ? p : null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connStatus, hasPos, raDeg, decDeg, tick, geom, site.latDeg, site.lonDeg]);
 
   // ÉTIQUETTES HORIZONTALES (v2.4.0) : noms toujours lisibles, sans
   // chevauchement, posés en priorité sur les objets les plus brillants.
@@ -248,6 +273,9 @@ export function SkyScreen({navigation}: {navigation?: {navigate: (s: string) => 
       const {center: ctr, fov: f, size: sz} = live.current;
       const nc = panCenter(ctr.altDeg, ctr.azDeg, dx, dy, {fovDeg: FOV_DEG[f], width: sz.w, height: sz.h});
       setManual({altDeg: nc.altDeg, azDeg: nc.azDeg});
+      // v2.9.5 : le glisser coupe le SUIVI (exploration libre) — la carte
+      // reste où posée ; « ↺ Recentrer » ou un GOTO réarment le suivi.
+      setFollow(false);
     },
     onPanResponderRelease: (e) => {
       const wasTap = drag.current && !drag.current.moved;
@@ -522,6 +550,25 @@ export function SkyScreen({navigation}: {navigation?: {navigate: (s: string) => 
                 stroke={c.green} strokeOpacity={0.35} strokeWidth={1} />
             </React.Fragment>
           ) : null}
+
+          {/* TÉLESCOPE : croix cyan à la position réelle de la monture
+              (v2.9.5) — visible même en exploration manuelle (« ne suit pas
+              le chercheur » : la carte restait immobile SANS montrer où
+              pointait le télescope). En suivi il recouvre le réticule. */}
+          {scopeMark ? (() => {
+            const cx = scopeMark.x; const cy = scopeMark.y;
+            const col = '#56C8FF';
+            return (
+              <React.Fragment>
+                <Circle cx={cx} cy={cy} r={9} fill="none" stroke={col} strokeWidth={1.6} />
+                <Circle cx={cx} cy={cy} r={1.8} fill={col} />
+                <Line x1={cx - 15} y1={cy} x2={cx - 9} y2={cy} stroke={col} strokeWidth={1.3} />
+                <Line x1={cx + 9} y1={cy} x2={cx + 15} y2={cy} stroke={col} strokeWidth={1.3} />
+                <Line x1={cx} y1={cy - 15} x2={cx} y2={cy - 9} stroke={col} strokeWidth={1.3} />
+                <Line x1={cx} y1={cy + 9} x2={cx} y2={cy + 15} stroke={col} strokeWidth={1.3} />
+              </React.Fragment>
+            );
+          })() : null}
         </Svg>
 
         {/* étiquettes horizontales (v2.4.0) : TOUJOURS horizontales,
@@ -545,12 +592,16 @@ export function SkyScreen({navigation}: {navigation?: {navigate: (s: string) => 
         <Text style={{position: 'absolute', right: 8, bottom: 4, color: c.textFaint, fontSize: 10}}>{mirror ? '→' : '←'} O</Text>
         <Text style={{position: 'absolute', left: 8, top: 4, color: c.textFaint, fontSize: 10}}>{t.sky.tapHint}</Text>
         <Text style={{position: 'absolute', right: 8, top: 4, color: c.textFaint, fontSize: 10}}>
-          {center.src === 'scope' ? t.sky.followScope : center.src === 'phone' ? t.sky.followPhone : t.sky.followManual}
+          {center.src === 'scope' ? t.sky.followScope
+            : center.src === 'target' ? t.sky.followTarget
+            : center.src === 'phone' ? t.sky.followPhone
+            : t.sky.followManual}
         </Text>
       </View>
 
-      {manual ? (
-        <Btn label={t.sky.recenter} variant="ghost" onPress={() => setManual(null)} style={{marginTop: 6}} />
+      {!follow ? (
+        <Btn label={t.sky.recenter} variant="ghost"
+          onPress={() => {setManual(null); setFollow(true);}} style={{marginTop: 6}} />
       ) : null}
 
       {/* ---------- CONTRÔLE CROISÉ GOTO ---------- */}

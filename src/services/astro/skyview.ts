@@ -199,3 +199,72 @@ export function panCenter(
   const az = ((centerAzDeg + dAz) % 360 + 360) % 360;
   return {altDeg: alt, azDeg: az};
 }
+
+/* ------------------------------------------------------------------ */
+/* CENTRAGE DE LA CARTE (v2.9.5) — décision PURE, testée               */
+/* ------------------------------------------------------------------ */
+
+/** Fraîcheur d'une position télescope : au-delà, la position n'est plus
+ *  « en direct » (raquette muette pendant un slew direct, liaison faible) —
+ *  recentrer la carte dessus la ferait SAUTER en arrière. */
+export const SKY_SCOPE_FRESH_MS = 8000;
+/** Une cible récemment choisie reste le centre de secours 3 min : c'est
+ *  elle que la monture rejoint (slew direct muet = position périmée). */
+export const SKY_TARGET_HOLD_MS = 180000;
+
+export type SkyCenterSrc = 'manual' | 'target' | 'scope' | 'phone';
+
+export interface SkyCenterInput {
+  /** Suivi actif (défaut) : la carte colle au télescope. Le glisser le
+   *  désactive (exploration), un GOTO ou « Recentrer » le réarme. */
+  follow: boolean;
+  /** Centre posé à la main (pan). */
+  manual: {altDeg: number; azDeg: number} | null;
+  gotoRunning: boolean;
+  /** Cible courante projetée en alt/az (null si aucune). */
+  target: {altDeg: number; azDeg: number} | null;
+  /** Cible choisie il y a moins de SKY_TARGET_HOLD_MS. */
+  targetRecent: boolean;
+  /** Télescope projeté en alt/az (null si non connecté/sans position). */
+  scope: {altDeg: number; azDeg: number} | null;
+  /** Télescope lu depuis moins de SKY_SCOPE_FRESH_MS. */
+  scopeFresh: boolean;
+  /** Visée du tube déduite des capteurs du téléphone (repli). */
+  phone: {altDeg: number; azDeg: number} | null;
+  /** Défaut quand rien n'est disponible. */
+  fallback: {altDeg: number; azDeg: number};
+}
+
+export interface SkyCenter {
+  altDeg: number;
+  azDeg: number;
+  src: SkyCenterSrc;
+}
+
+/**
+ * Décision de centrage de la carte du ciel (v2.9.5 — remplace la priorité
+ * v2.9.4 « le pan manuel gagne jusqu'au GOTO suivant », qui figeait la carte :
+ * « elle revient ensuite dans sa position initiale et ne suit pas le
+ * chercheur »).
+ *
+ * Priorité :
+ *  1. EXPLORATION (suivi coupé par le glisser) : la carte reste où posée ;
+ *     le télescope reste visible via son marqueur ✛ cyan.
+ *  2. GOTO EN COURS : la carte va sur la CIBLE — pas de saut vers la
+ *     position périmée du télescope (« revient dans sa position initiale »).
+ *  3. TÉLESCOPE FRAÎS : suivi live (dérive de suivi incluse, 1 Hz).
+ *  4. CIBLE RÉCENTE si le télescope est muet (slew direct : :MS parti, la
+ *     raquette ne répond plus :Gr#/:Gd# avant l'arrivée) — la carte attend
+ *     sur la destination au lieu de repartir vers la vieille position.
+ *  5. TÉLESCOPE périmé (mieux que rien), puis téléphone, puis défaut.
+ */
+export function skyCenter(inp: SkyCenterInput): SkyCenter {
+  if (!inp.follow && inp.manual) return {...inp.manual, src: 'manual'};
+  if (inp.gotoRunning && inp.target) return {...inp.target, src: 'target'};
+  if (inp.scope && inp.scopeFresh) return {...inp.scope, src: 'scope'};
+  if (inp.target && inp.targetRecent) return {...inp.target, src: 'target'};
+  if (inp.scope) return {...inp.scope, src: 'scope'};
+  if (inp.phone && !inp.manual) return {...inp.phone, src: 'phone'};
+  if (inp.manual) return {...inp.manual, src: 'manual'};
+  return {...inp.fallback, src: 'phone'};
+}
