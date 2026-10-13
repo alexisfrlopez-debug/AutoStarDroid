@@ -130,6 +130,20 @@ export const MEADE_DRIVER: MeadeDriver = {
   },
 
   async goto(c: DriverClient, raDeg: number, decDeg: number): Promise<GotoStatus> {
+    // v2.9.4 — BOOST DE VITESSE avant la séquence : le GOTO natif :MS# roule
+    // au taux COURANT de la raquette — si elle est restée à un taux lent
+    // (center/guide du suivi ou du réglage fin), le pointage natif part en
+    // rampe. :RS# + :R9# (doublon de famille, cf. setSpeed) remontent le
+    // taux AVANT :Sr/:Sd/:MS — sans effet si déjà au maximum.
+    // Best-effort : une écriture impossible ici ne doit PAS court-circuiter
+    // la gestion d'erreur de la séquence (noLink/mute — tests v2.0.1).
+    // SANS sommeil intermédiaire : les tests à timers factifs (fineTune)
+    // n'avancent jamais les timers pendant un await — et en production les
+    // allers-retours du pont natif espacent déjà les écritures.
+    try {
+      await c.cmdSilent(':RS#');
+      await c.cmdSilent(':R9#');
+    } catch (_) { /* liaison en défaut : la séquence :Sr le détectera */ }
     const r1 = await this.setTargetBit(c, ':Sr', [proto.raCmd(raDeg), proto.raCmdLow(raDeg)]);
     if (r1 !== '1') {
       c.log('error', `GO TO : AD refusée par la raquette (${
@@ -144,7 +158,10 @@ export const MEADE_DRIVER: MeadeDriver = {
     }
     let ms = '';
     try {
-      ms = await c.cmd(':MS#', 5000, VALID.digit);
+      // 3000 ms (v2.9.4, avant 5000) : une raquette qui répond le fait en
+      // < 100 ms — 3 s suffisent, et un mutisme coûte 2 s de moins à chaque
+      // GOTO qui retombera sur le relais.
+      ms = await c.cmd(':MS#', 3000, VALID.digit);
     } catch (_) {
       if (!c.transportAlive()) return 'noLink';
       // :MS muet — le slew a peut-être démarré : on SONDE :D# avant d'échouer

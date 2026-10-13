@@ -215,6 +215,7 @@ export class AutostarClient implements DriverClient {
       throw e;
     }
     this.transport = transport;
+    this.directGotoDead = false; // nouvelle liaison : le chemin natif reprend son droit
     if (type === 'usb') {
       // Mémorise l'identité du périphérique (VID/PID) pour la reconnexion
       // automatique : un glitch de bus re-énumère l'adaptateur SOUS UN AUTRE
@@ -714,6 +715,18 @@ export class AutostarClient implements DriverClient {
    *  (la monture finissait en butée). */
   private relayGen = 0;
 
+  /** v2.9.4 — « le goto est toujours lent quand il se lance » (2e retour) :
+   *  le CHEMIN DIRECT (:Sr/:Sd/:MS) échoue en mutisme sur certaines raquettes
+   *  (#49x sur série lente) — chaque GOTO repayait alors 15-25 s de sondes
+   *  muettes (ESC ESC + 2 précisions :Sr + :Sd + :MS 3 s + sonde :D#) AVANT
+   *  que le relais ne bouge la monture : le pointage « démarre » en réalité
+   *  très tard. Dès qu'un chemin direct échoue (muet OU refus des 2
+   *  précisions), les GOTO suivants de la session partent DIRECTEMENT en
+   *  relais. Réinitialisé à chaque connexion/reconnexion : un changement
+   *  d'état de la raquette (appui MODE, redémarrage, autre câble) redonne
+   *  sa chance au chemin natif — plus rapide quand il est accepté. */
+  private directGotoDead = false;
+
   /** ARRÊT IMMÉDIAT du GOTO en cours (relais boucle fermée OU slew direct)
    *  — bouton ARRÊTER global. Coupe les moteurs tout de suite (:Q#), tue le
    *  relais (génération) et libère l'interface. */
@@ -775,7 +788,18 @@ export class AutostarClient implements DriverClient {
     // physique, sans trafic concurrent, passait toujours).
     this.cmdPhase = true;
     try {
+      // v2.9.4 — chemin direct déjà mort dans cette session : relais
+      // IMMÉDIAT (le premier mouvement moteur part en ~1 s au lieu de
+      // 15-25 s de sondage d'une séquence connue muette).
+      if (this.directGotoDead && this.drv.caps.relay) {
+        this.log('info', 'GO TO : chemin natif déjà muet/refusé dans cette session — RELAIS immédiat');
+        return await this.gotoRaDecRelay(raDeg, decDeg, 'mute', horizonNow, gen);
+      }
       const r = await this.gotoRaDecInner(raDeg, decDeg);
+      if (r === 'mute' || r === 'refused') {
+        // un seul échec suffit : la sonde du prochain GOTO ne repayera pas
+        this.directGotoDead = true;
+      }
       if (r === 'ok') {
         // GOTO parti : fenêtre « mouvement app » + suivi de fin + notifications
         this.ownMoveUntil = Math.max(this.ownMoveUntil, Date.now() + 45000);

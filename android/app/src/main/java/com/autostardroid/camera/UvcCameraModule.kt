@@ -109,9 +109,14 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
     private const val ST_VS_FORMAT_FRAME_BASED = 0x10
     private const val ST_VS_FRAME_FRAME_BASED = 0x11
 
-    // Sélecteurs de contrôle (CS)
-    private const val CS_PROBE = 0x01
-    private const val CS_COMMIT = 0x02
+    // Sélecteurs de contrôle (CS) — UVC spec table A-6 (VideoStreaming
+    // Interface Control Selectors) : VS_CONTROL_UNDEFINED 0x00,
+    // VS_PROBE_CONTROL 0x02, VS_COMMIT_CONTROL 0x03. ⚠️ AVANT v2.9.4 :
+    // 0x01/0x02 — le 0x01 est INDÉFINI : TOUTES les caméras stallent
+    // GET_LEN/GET_CUR/SET_CUR sur le probe (« PROBE refusé par la caméra »
+    // dès la v2.9.3 — le dump lens=26,34,48, curOK=0 l'a trahi).
+    private const val CS_PROBE = 0x02
+    private const val CS_COMMIT = 0x03
   }
 
   private val usbManager: UsbManager?
@@ -352,24 +357,42 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
                 // endpoints (après les descripteurs de classe) jamais vus
                 // (retour terrain : « Aucun endpoint VideoStreaming IN »).
                 // Format inconnu → frame simplement ignorée.
+                // ⚠️ OFFSETS (v2.9.4) — descripteur de frame UVC : bFrameIndex@3,
+                // wWidth@5, wHeight@7, dwDefaultFrameInterval@21,
+                // bFrameIntervalType@25, dwFrameInterval(k)@26+k×4. AVANT :
+                // tout décalé de +3 octets → w/h faux, et surtout des
+                // INTERVALLES ABSURDES (1706666496 ≈ 170 s — repris dans le
+                // dump « PROBE refusé » : interval=1706666496) qu'aucune
+                // caméra n'accepte dans le probe.
                 val f = curFormat
                 if (f != null) {
                   val idx = d[i + 3].toInt() and 0xFF
-                  val w = (d[i + 4].toInt() and 0xFF) or ((d[i + 5].toInt() and 0xFF) shl 8)
-                  val h = (d[i + 6].toInt() and 0xFF) or ((d[i + 7].toInt() and 0xFF) shl 8)
-                  val nTypes = d[i + 28].toInt() and 0xFF
+                  val w = (d[i + 5].toInt() and 0xFF) or ((d[i + 6].toInt() and 0xFF) shl 8)
+                  val h = (d[i + 7].toInt() and 0xFF) or ((d[i + 8].toInt() and 0xFF) shl 8)
+                  val defInt = le32(d, i + 21)
+                  val nTypes = d[i + 25].toInt() and 0xFF
                   val intervals = ArrayList<Int>()
-                  if (nTypes == 0 && i + 41 <= i + len) {
-                    // continu : min / max / pas
-                    val lo = le32(d, i + 29); val hi = le32(d, i + 33); val step = le32(d, i + 37).coerceAtLeast(1)
+                  if (nTypes == 0 && i + 38 <= i + len) {
+                    // continu : min / max / pas (@26/@30/@34)
+                    val lo = le32(d, i + 26); val hi = le32(d, i + 30); val step = le32(d, i + 34).coerceAtLeast(1)
                     var v = lo
                     while (v <= hi && intervals.size < 32) { intervals.add(v); v += step }
                   } else {
                     var k = 0
-                    while (k < nTypes && i + 29 + k * 4 + 3 < i + len) {
-                      intervals.add(le32(d, i + 29 + k * 4)); k += 1
+                    while (k < nTypes && i + 26 + k * 4 + 3 < i + len) {
+                      intervals.add(le32(d, i + 26 + k * 4)); k += 1
                     }
                   }
+                  // SANITÉ (v2.9.4) : un intervalle UVC vaut 10 ms…1 s
+                  // (10_000_000 = 1 fps ; 100_000 = 100 fps) en unités de
+                  // 100 ns. Tout ce qui sort de cette plage (firmware
+                  // exotique, lecture désalignée) est JETÉ ; si tout est jeté,
+                  // repli : intervalle par défaut du descripteur, sinon 30 fps.
+                  intervals.removeAll { it < 100_000 || it > 10_000_000 }
+                  if (intervals.isEmpty() && defInt in 100_000..10_000_000) {
+                    intervals.add(defInt)
+                  }
+                  if (intervals.isEmpty()) intervals.add(333_333)
                   f.frames.add(UvcFrame(idx, w, h, intervals.toIntArray()))
                 }
               }
@@ -610,6 +633,13 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
           val f = dev.getInterface(k)
           if (f.id == ifc && f.alternateSetting == 0) {
             try { conn.claimInterface(f, false) } catch (_: Exception) {}
+            // SET_INTERFACE(alt 0) EXPLICITE (v2.9.4, pratique libuvc) :
+            // une interface VS restée sur un alt > 0 d'une session
+            // précédente fait refuser le probe/commit par certains
+            // firmwares. Best-effort — sans effet si déjà à alt 0.
+            try {
+              conn.controlTransfer(0x01, 0x0B, 0, ifc and 0xFF, null, 0, 200)
+            } catch (_: Exception) {}
             break
           }
         }

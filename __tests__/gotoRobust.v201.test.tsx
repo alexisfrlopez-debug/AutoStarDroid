@@ -83,7 +83,8 @@ describe('v2.0.1 — GOTO granulaire (fini le « Connexion refusée » fourre-to
     ({client, tp} = await connectedClient());
     // :Sr haute précision muet ; ESC ESC muet ; retentative acceptée ;
     // :Sd accepté ; :MS = 0 (slew parti).
-    tp.script = [null, null, '1#', '1#', '0#'];
+    // v2.9.4 : le boost de vitesse (:RS#/:R9#, muets) précède la séquence.
+    tp.script = [null, null, null, null, '1#', '1#', '0#'];
     const r = await client.gotoRaDec(82.75, 22.0147);
     expect(r).toBe('ok');
     // la retentative a bien eu lieu APRÈS le reset ESC ESC
@@ -95,7 +96,8 @@ describe('v2.0.1 — GOTO granulaire (fini le « Connexion refusée » fourre-to
 
   test(':Sr muet même après ESC ESC → relais : position illisible → \'mute\' (pas de :Sd ni :MS)', async () => {
     ({client, tp} = await connectedClient());
-    tp.script = [null, null, null]; // muet, muet (ESC ESC), muet (retentative)
+    // v2.9.4 : boost :RS#/:R9# muets, puis :Sr muet ×2 (ESC ESC + retentative)
+    tp.script = [null, null, null, null, null];
     // relais : site pôle Nord (alt = dec > 0 garanti), position illisible
     useSettingsStore.getState().setSite({name: 'Pôle', latDeg: 90, lonDeg: 0, elevM: 0});
     const r = await client.gotoRaDec(82.75, 22.0147);
@@ -103,13 +105,15 @@ describe('v2.0.1 — GOTO granulaire (fini le « Connexion refusée » fourre-to
     expect(tp.writes.some((w) => w.startsWith(':Sd'))).toBe(false);
     expect(tp.writes.some((w) => w === ':MS#')).toBe(false);
     // le relais a bien été tenté, mais sans aucune lecture de position : pas
-    // un seul ordre moteur ne part (sécurité)
-    expect(tp.writes.some((w) => w === ':RS#' || w === ':RC#')).toBe(false);
+    // un seul ordre moteur ne part (sécurité) — le boost v2.9.4 :RS# est
+    // attendu (vitesse), :RC#/:Me#/:Mn# sont des ordres moteur/taux relais
+    expect(tp.writes.some((w) => w === ':RC#' || w === ':Me#' || w === ':Mn#')).toBe(false);
   }, 15000);
 
   test('refus explicite « 0 » aux 2 précisions → \'refused\' sur le chemin DIRECT (v1.8.1 conservé)', async () => {
     ({client, tp} = await connectedClient());
-    tp.script = ['0#', '0#'];
+    // v2.9.4 : boost :RS#/:R9# (muets) puis :Sr refusé ×2
+    tp.script = [null, null, '0#', '0#'];
     // v2.5.0 : le CHEMIN DIRECT garde la sémantique de refus (testée ici sur
     // gotoRaDecInner) ; ensuite gotoRaDec enchaîne sur le relais (tests v2.5.0)
     const r = await (client as any).gotoRaDecInner(82.75, 22.0147);
@@ -120,7 +124,8 @@ describe('v2.0.1 — GOTO granulaire (fini le « Connexion refusée » fourre-to
   test(':MS muet → sonde :D# voit la barre « | » → slew confirmé parti → \'ok\'', async () => {
     ({client, tp} = await connectedClient());
     // :Sr ok, :Sd ok, :MS muet, [sonde 700 ms] :D# → « | » (moteur en marche)
-    tp.script = ['1#', '1#', null, '|#'];
+    // v2.9.4 : boost :RS#/:R9# (muets) en tête
+    tp.script = [null, null, '1#', '1#', null, '|#'];
     const r = await client.gotoRaDec(10, -30);
     expect(r).toBe('ok');
     expect(tp.writes.some((w) => w === ':D#')).toBe(true);
@@ -129,14 +134,16 @@ describe('v2.0.1 — GOTO granulaire (fini le « Connexion refusée » fourre-to
   test(':MS muet → sonde :D# voit la monture à l\'arrêt (vide) → \'mute\' → relais refuse sous l\'horizon', async () => {
     ({client, tp} = await connectedClient());
     // :Sr ok, :Sd ok, :MS muet, [sonde] :D# → vide (à l'arrêt : :MS sans effet)
-    tp.script = ['1#', '1#', null, '#'];
+    // v2.9.4 : boost :RS#/:R9# (muets) en tête
+    tp.script = [null, null, '1#', '1#', null, '#'];
     // relais : site pôle Nord → alt(DEC −30°) = −30° < 0 : le garde-fou
     // horizon du relais refuse de piloter les moteurs sous l'horizon
     useSettingsStore.getState().setSite({name: 'Pôle', latDeg: 90, lonDeg: 0, elevM: 0});
     const r = await client.gotoRaDec(10, -30);
     expect(r).toBe('belowHorizon');
     // aucune impulsion moteur : le relais s'est arrêté au garde-fou
-    expect(tp.writes.some((w) => w === ':RS#' || w === ':RC#' || w === ':Me#' || w === ':Mn#')).toBe(false);
+    // (le boost v2.9.4 :RS# est une commande de VITESSE, pas un moteur)
+    expect(tp.writes.some((w) => w === ':RC#' || w === ':Me#' || w === ':Mn#')).toBe(false);
   }, 15000);
 
   test('liaison morte (écriture impossible) → \'noLink\' ET connexion remise à zéro', async () => {
@@ -206,7 +213,7 @@ describe('v2.1.1 — GOTO hors raquette : ligne série réservée à la séquenc
     useScopeStore.setState({hbSync: 'live' as const});
     (client as any).setPollInterval(25);
     (client as any).startPoll();
-    tp.script = [null, null, null]; // :Sr muet ×2 → statut 'mute' → relais
+    tp.script = [null, null, null, null, null]; // boost muet ×2 + :Sr muet ×2 → 'mute' → relais
     // relais : alt = dec (+20° au pôle Nord) > 0 garanti, position illisible →
     // abandon immédiat sans moteur
     useSettingsStore.getState().setSite({name: 'Pôle', latDeg: 90, lonDeg: 0, elevM: 0});

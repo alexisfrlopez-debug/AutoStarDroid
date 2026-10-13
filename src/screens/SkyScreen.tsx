@@ -86,6 +86,7 @@ export function SkyScreen({navigation}: {navigation?: {navigate: (s: string) => 
   const decDeg = useScopeStore((st) => st.decDeg);
   const targetRa = useScopeStore((st) => st.targetRaDeg);
   const targetDec = useScopeStore((st) => st.targetDecDeg);
+  const gotoRunning = useScopeStore((st) => st.gotoRunning);
   const setTarget = useScopeStore((st) => st.setTarget);
   const setTrackTarget = useTrackingStore((st) => st.setTarget);
   const skyMountPose = useSettingsStore((st) => st.skyMountPose);
@@ -117,14 +118,29 @@ export function SkyScreen({navigation}: {navigation?: {navigate: (s: string) => 
     return rel;
   }, [connStatus, hasPos]);
 
-  // Centre de la carte : télescope > téléphone (visée TUBE transformée par
-  // le montage) > pan manuel
+  // Pendant un GOTO le suivi du télescope reprend AUTOMATIQUEMENT : la
+  // carte doit suivre les moteurs (contrôle croisé) — le pan manuel est
+  // oublié. (v2.9.4)
+  useEffect(() => {
+    if (gotoRunning) setManual(null);
+  }, [gotoRunning]);
+
+  // Centre de la carte : PAN MANUEL (v2.9.4) > télescope > téléphone > défaut
   const mountCfg: PhoneMountConfig = useMemo(
     () => ({pose: skyMountPose, angle: skyMountAngle, position: skyMountPosition}),
     [skyMountPose, skyMountAngle, skyMountPosition],
   );
   const center = useMemo(() => {
     const nowD = new Date();
+    // v2.9.4 — « la carte du ciel est figée, je ne peux pas la faire glisser » :
+    // le centre était FORCÉ à la position du télescope dès qu'elle est lue
+    // (chaque seconde + chaque itération de relais) — le pan manuel était
+    // écrasé avant d'être visible. Désormais le glisser GAGNE : la carte
+    // reste où l'utilisateur l'a posée ; le suivi reprend par le bouton
+    // « ↺ Recentrer » ou automatiquement à chaque GOTO (au-dessus).
+    if (manual && !gotoRunning) {
+      return {altDeg: manual.altDeg, azDeg: manual.azDeg, src: 'manual' as const};
+    }
     if (connStatus === 'connected' && hasPos) {
       const aa = raDecToAltAz(raDeg, decDeg, site.latDeg, site.lonDeg, nowD);
       return {altDeg: aa.altDeg, azDeg: aa.azDeg, src: 'scope' as const};
@@ -141,7 +157,7 @@ export function SkyScreen({navigation}: {navigation?: {navigate: (s: string) => 
     }
     return {altDeg: manual?.altDeg ?? 35, azDeg: manual?.azDeg ?? 180, src: manual ? ('manual' as const) : ('phone' as const)};
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tick, connStatus, hasPos, raDeg, decDeg, site.latDeg, site.lonDeg, phoneOrient, manual, declinationDeg, mountCfg]);
+  }, [tick, connStatus, hasPos, raDeg, decDeg, site.latDeg, site.lonDeg, phoneOrient, manual, gotoRunning, declinationDeg, mountCfg]);
 
   const geom: ViewGeometry = useMemo(() => ({
     centerAltDeg: center.altDeg,

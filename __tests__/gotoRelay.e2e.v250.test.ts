@@ -77,11 +77,12 @@ describe('v2.5.0 — GOTO RELAIS en boucle fermée (fin de la déconnexion au GO
 
   test(':Sr refusé aux 2 précisions → RELAIS converge vers la cible → ok (moteurs :RS/:Me/:Qe)', async () => {
     ({client, tp} = await connectedClient());
-    // chemin direct : :Sr haute précision refusée, basse précision refusée
+    // chemin direct : boost v2.9.4 (:RS#/:R9# muets), :Sr hp refusée, lp refusée
     // relais : position (AD 6h00 = 90°, DEC +20*00) → cible (AD 100°, DEC 20°)
     // v2.9.3 : setSpeed à CHAQUE itération + doublon :RS#/:R9# → 4 écritures
-    // par itération (RS, R9, Me, Qe)
+    // par itération (RS, R9, Me, Qe) ; v2.9.4 : + boost initial (:RS#/:R9#)
     tp.script = [
+      null, null,                       // boost v2.9.4 : :RS#, :R9#
       '0#', '0#',                       // :Sr refusé ×2 → 'refused' → relais
       '06:00:00#', '+20*00#',           // position initiale : AD 90°, DEC 20°
       null, null, null, null,           // :RS#, :R9#, :Me#, :Qe#
@@ -95,7 +96,7 @@ describe('v2.5.0 — GOTO RELAIS en boucle fermée (fin de la déconnexion au GO
     // les commandes du relais sont passées par là
     expect(tp.writes).toContain(':RS#');       // vitesse slew
     expect(tp.writes).toContain(':R9#');       // doublon Autostar v2.9.3
-    expect(tp.writes.filter((w) => w === ':RS#').length).toBe(2); // à CHAQUE itération
+    expect(tp.writes.filter((w) => w === ':RS#').length).toBe(3); // boost + CHAQUE itération
     expect(tp.writes.filter((w) => w === ':Me#').length).toBe(2); // 2 impulsions Est
     expect(tp.writes.filter((w) => w === ':Qe#').length).toBe(2); // stop individuel
     expect(tp.writes.filter((w) => w === ':Q#').length).toBe(2);  // stopAll ×2
@@ -109,6 +110,7 @@ describe('v2.5.0 — GOTO RELAIS en boucle fermée (fin de la déconnexion au GO
     // v2.9.3 : 4 écritures par itération (RS, R9, Me, Qe) — l'apprentissage
     // ne s'applique pas (arc mesuré sous le bruit : valeur précédente)
     tp.script = [
+      null, null,                       // boost v2.9.4 : :RS#, :R9#
       '0#', '0#',                       // :Sr refusé ×2 → relais
       '06:00:00#', '+20*00#',           // position initiale
       null, null, null, null, '06:00:00#', '+20*00#',  // impulsion 1 : rien ne bouge
@@ -123,9 +125,12 @@ describe('v2.5.0 — GOTO RELAIS en boucle fermée (fin de la déconnexion au GO
 
   test('RELAIS : cible sous l\u2019horizon → belowHorizon sans AUCUN moteur', async () => {
     ({client, tp} = await connectedClient());
-    tp.script = ['0#', '0#']; // chemin direct refusé → relais
+    tp.script = [
+      null, null,                       // boost v2.9.4 : :RS#, :R9#
+      '0#', '0#',                       // chemin direct refusé → relais
+    ];
     const r = await client.gotoRaDec(100, -30); // DEC −30° au pôle → alt −30
     expect(r).toBe('belowHorizon');
-    expect(tp.writes.some((w) => w === ':RS#' || w === ':RC#' || w === ':Me#' || w === ':Mw#' || w === ':Mn#' || w === ':Ms#')).toBe(false);
+    expect(tp.writes.some((w) => w === ':RC#' || w === ':Me#' || w === ':Mw#' || w === ':Mn#' || w === ':Ms#')).toBe(false);
   }, 30000);
 });

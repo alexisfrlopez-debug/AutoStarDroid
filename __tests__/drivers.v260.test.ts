@@ -106,9 +106,12 @@ describe('v2.6.0 — driver Meade', () => {
     c.on(':MS#', '0');
     const r = await DRIVERS.meade.goto(c, 82.75, 22.0147);
     expect(r).toBe('ok');
-    expect(c.sent[0]).toMatch(/^:Sr\d{1,2}:\d{2}:\d{2}#/);
-    expect(c.sent[1]).toMatch(/^:Sd\+?\d{1,2}\*\d{2}/);
-    expect(c.sent[2]).toBe(':MS#');
+    // v2.9.4 : le boost de vitesse (:RS#/:R9#) précède la pose de cible
+    expect(c.sent[0]).toBe(':RS#');
+    expect(c.sent[1]).toBe(':R9#');
+    expect(c.sent[2]).toMatch(/^:Sr\d{1,2}:\d{2}:\d{2}#/);
+    expect(c.sent[3]).toMatch(/^:Sd\+?\d{1,2}\*\d{2}/);
+    expect(c.sent[4]).toBe(':MS#');
   });
 
   it('GOTO : refus haute précision → retentative BASSE précision', async () => {

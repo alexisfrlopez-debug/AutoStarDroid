@@ -114,6 +114,7 @@ describe('v2.9.3 — RELAIS e2e : palier find (fin de la course rampante)', () =
     // :Sr refusé ×2 → relais ; position AD 100° (14h40) → cible AD 101°
     // impulsion 1 (find 0,4°/s : 1×0,8/0,4 = 2 s) → arrivée
     tp.script = [
+      null, null,                       // boost v2.9.4 : :RS#, :R9#
       '0#', '0#',                       // :Sr refusé ×2 → relais
       '06:40:00#', '+20*00#',           // position initiale : AD 100°, DEC 20°
       null, null, null, null,           // :RM#, :R4#, :Me#, :Qe#
@@ -125,7 +126,9 @@ describe('v2.9.3 — RELAIS e2e : palier find (fin de la course rampante)', () =
     expect(tp.writes).toContain(':RM#');   // palier find (famille LX200)
     expect(tp.writes).toContain(':R4#');   // doublon Autostar
     expect(tp.writes.some((w) => w === ':RC#')).toBe(false); // jamais center
-    expect(tp.writes.some((w) => w === ':RS#')).toBe(false); // jamais slew (< 2°)
+    // v2.9.4 : le boost du chemin direct envoie :RS# UNE fois ; le RELAIS
+    // n'a jamais slewté (cible à 1° — le palier reste find)
+    expect(tp.writes.filter((w) => w === ':RS#').length).toBe(1);
     expect(tp.writes.filter((w) => w === ':Me#').length).toBe(1);
   }, 30000);
 
@@ -147,6 +150,7 @@ describe('v2.9.3 — RELAIS e2e : palier find (fin de la course rampante)', () =
     useMotorCalibStore.getState().setRates({speed: 'slew', e: 2, w: 2, n: 2, s: 2, noise: 0.01});
     useMotorCalibStore.getState().setApply(true);
     tp.script = [
+      null, null,                       // boost v2.9.4 : :RS#, :R9#
       '0#', '0#',                       // :Sr refusé ×2 → relais
       '06:40:00#', '+20*00#',           // position initiale : AD 100°, DEC 20°
       null, null, null, null,           // itération 1 : :RS#, :R9#, :Me#, :Qe#
@@ -161,7 +165,7 @@ describe('v2.9.3 — RELAIS e2e : palier find (fin de la course rampante)', () =
     ];
     const r = await client.gotoRaDec(110, 20);
     expect(r).toBe('ok');
-    expect(tp.writes.filter((w) => w === ':RS#').length).toBe(2);  // 2 itérations slew
+    expect(tp.writes.filter((w) => w === ':RS#').length).toBe(3);  // boost + 2 itérations slew
     expect(tp.writes.filter((w) => w === ':RM#').length).toBe(1);  // 1 itération find
     expect(tp.writes.filter((w) => w === ':RC#').length).toBe(1);  // 1 itération center
     // le journal annonce le taux réel appris (une seule ligne, vitesse slew)
