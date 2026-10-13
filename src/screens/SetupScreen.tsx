@@ -59,11 +59,28 @@ export function SetupScreen() {
     setBusy(true);
     try {
       const p = await getPhonePosition();
-      const s: SiteInfo = {name: nameTxt || 'GPS', latDeg: p.latDeg, lonDeg: p.lonDeg, elevM: p.elevM};
+      // v2.9.7 — le champ nom n'a pas été édité : ne pas conserver le nom de
+      // site par défaut (« Paris ») avec les coordonnées GPS réelles —
+      // étiqueter « GPS » (comme la mise en station), renommable ensuite.
+      const name = nameTxt.trim() !== '' && nameTxt !== site.name ? nameTxt : 'GPS';
+      const s: SiteInfo = {name, latDeg: p.latDeg, lonDeg: p.lonDeg, elevM: p.elevM};
       setSite(s);
+      setNameTxt(name);
       setLatTxt(p.latDeg.toFixed(4));
       setLonTxt(p.lonDeg.toFixed(4));
       setDemoSite(p.latDeg, p.lonDeg);
+      // v2.9.7 — TOUTE information validée dans l'appli synchronise
+      // automatiquement la raquette : le site acquis par GPS part vers la
+      // raquette (date, heure, fuseau, site) sans attendre l'envoi manuel.
+      if (connected) {
+        try {
+          await autostar.pushPhoneData(p.latDeg, p.lonDeg);
+        } catch (_) {
+          // best-effort : l'envoi manuel reste disponible et la synchro auto
+          // repartira à la prochaine connexion
+        }
+      }
+      Alert.alert(t.common.success, `${t.setup.gpsDone}${connected ? `\n${t.setup.synced}` : ''}`);
     } catch (e) {
       // chaque cause a SON message (v2.1.2) : permission / services OFF / délai
       const code = e instanceof GpsError ? e.code : 'unavailable';
@@ -138,7 +155,7 @@ export function SetupScreen() {
       <Card style={{marginTop: 12}}>
         <Title text={t.setup.about} />
         <Text style={{color: c.textDim, fontSize: 13, lineHeight: 19}}>
-          AutoStar Droid v2.9.6 — émulation complète de la raquette Meade Autostar II
+          AutoStar Droid v2.9.7 — émulation complète de la raquette Meade Autostar II
           et des Autostar #49x, liaisons Wi-Fi, Bluetooth SPP, USB-série (câble Meade
           #505/#507, FTDI, PL2303, CP210x, CH340), GOTO avec catalogues
           Messier/NGC/étoiles/planètes, carte du ciel interactive (vue chercheur,
@@ -151,7 +168,8 @@ export function SetupScreen() {
           saisie manuelle), contrôle croisé GOTO télémétrie/moteurs,
           alignement télémétrique (gyroscope/boussole), diagnostic moteur complet
           adapté à la monture, mise à jour automatique de la raquette (date, heure,
-          site) à la connexion et reconnexion automatique USB/Bluetooth.
+          site) à la connexion et après chaque validation dans l'appli, parc
+          synchronisé sur la position Home, reconnexion automatique USB/Bluetooth.
         </Text>
       </Card>
     </ScrollView>

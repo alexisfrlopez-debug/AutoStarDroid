@@ -418,6 +418,7 @@ export const en = {
     phoneData: 'Phone data', gps: 'Get GPS position',
     syncPhone: 'Send date/time/site to handbox',
     synced: 'Handbox updated from phone',
+    gpsDone: 'GPS position acquired — site coordinates updated',
     autoSync: 'Auto-update handbox',
     autoSyncDesc: 'On every connection: phone date, time, timezone and site are sent to the handbox automatically.',
     gpsPerm: 'Location permission denied — allow it for AutoStar Droid in Android settings',

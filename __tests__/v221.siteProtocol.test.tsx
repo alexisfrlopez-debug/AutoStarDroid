@@ -124,7 +124,7 @@ describe('v2.2.1 — pushPhoneData : :SG (UTC−local) et :Sg (Est négatif)', (
 
   it('Paris : :Sg-002*21# + :St+48*51# (jamais "+002*21")', async () => {
     const {client, tp} = await scriptClient();
-    tp.script = ['1#', '1#', '1#', '1#', '1#'];
+    tp.script = ['1#', '1#', '1#', '1#', '1#', '0#'];
     const p = client.pushPhoneData(48.8566, 2.3522);
     await flush(900);
     const r = await p;
@@ -137,7 +137,7 @@ describe('v2.2.1 — pushPhoneData : :SG (UTC−local) et :Sg (Est négatif)', (
 
   it('New York : :Sg+074*00# (Ouest → positif)', async () => {
     const {client, tp} = await scriptClient();
-    tp.script = ['1#', '1#', '1#', '1#', '1#'];
+    tp.script = ['1#', '1#', '1#', '1#', '1#', '0#'];
     const p = client.pushPhoneData(40.7128, -74.006);
     await flush(900);
     await p;
@@ -148,7 +148,7 @@ describe('v2.2.1 — pushPhoneData : :SG (UTC−local) et :Sg (Est négatif)', (
 
   it(':SG = UTC − local (opposé du décalage cartographique du téléphone)', async () => {
     const {client, tp} = await scriptClient();
-    tp.script = ['1#', '1#', '1#', '1#', '1#'];
+    tp.script = ['1#', '1#', '1#', '1#', '1#', '0#'];
     const now = new Date();
     const tzOffsetMin = -now.getTimezoneOffset(); // local − UTC
     const tzH = Math.floor(Math.abs(tzOffsetMin) / 60);
@@ -165,7 +165,7 @@ describe('v2.2.1 — pushPhoneData : :SG (UTC−local) et :Sg (Est négatif)', (
 
   it('refus explicite ("0") → journalisé, sans échouer', async () => {
     const {client, tp} = await scriptClient();
-    tp.script = ['1#', '1#', '1#', '1#', '0#']; // :Sg refusé
+    tp.script = ['1#', '1#', '1#', '0#', '1#', '0#']; // :Sg refusé (ordre v2.9.7 : :Sg avant :SC)
     const p = client.pushPhoneData(48.8566, 2.3522);
     await flush(900);
     await p;
@@ -178,7 +178,7 @@ describe('v2.2.1 — pushPhoneData : :SG (UTC−local) et :Sg (Est négatif)', (
   it('raquette muette → aucun rejet journalisé, promesse résolue', async () => {
     const t0 = Date.now(); // le journal est global : ne regarder que ce test
     const {client, tp} = await scriptClient();
-    tp.script = [null, null, null, null, null];
+    tp.script = [null, null, null, null, null, null]; // raquette muette (y c. sonde :GG#)
     const p = client.pushPhoneData(48.8566, 2.3522);
     await flush(900);
     const r = await p;

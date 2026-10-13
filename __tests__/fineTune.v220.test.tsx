@@ -193,7 +193,7 @@ class MountTransport implements Transport {
     if (data === ':MS#') {this.reply('0#'); return;}
     if (data === ':D#') {this.reply('#'); return;} // à l'arrêt
     if (data.startsWith(':SG') || data.startsWith(':SL') || data.startsWith(':SC')
-      || data.startsWith(':St') || data.startsWith(':Sg')) {this.reply('1#'); return;}
+      || data.startsWith(':St') || data.startsWith(':Sg') || data === ':GG#') {this.reply('1#'); return;}
     if (data === ':Ga#') {this.reply('+30:00#'); return;}
     if (data === ':Gz#') {this.reply('+40:00#'); return;}
     if (data === ':Gr#') {this.reply('10:00:00#'); return;}

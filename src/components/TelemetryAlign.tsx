@@ -217,6 +217,12 @@ export function TelemetryAlign() {
     try {
       const pos = await getPhonePosition();
       setSite({...site, latDeg: pos.latDeg, lonDeg: pos.lonDeg, elevM: pos.elevM || site.elevM});
+      // v2.9.7 — toute information validée dans l'appli synchronise
+      // automatiquement la raquette : le site validé ici part vers la
+      // raquette (best-effort, l'échec n'interrompt jamais la télémétrie).
+      if (connStatus === 'connected') {
+        await autostar.pushPhoneData(pos.latDeg, pos.lonDeg).catch(() => undefined);
+      }
     } catch (_) {
       Alert.alert(t.common.error, t.align.telem.gpsFail);
     } finally {

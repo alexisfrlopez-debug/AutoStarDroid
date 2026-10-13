@@ -268,8 +268,9 @@ class ReplTransport implements Transport {
     else if (data === ':GVP#') this.reply('Autostar#');
     else if (data === ':GVN#') this.reply('43Eg#');
     // v2.2.0 : réponses d'accusé (horloge/site), cibles, écran LCD idle
+    // v2.9.7 : :GG# acquitté aussi (sonde de fin de « Updating Planetary Data »)
     else if (data.startsWith(':SG') || data.startsWith(':SL') || data.startsWith(':SC')
-      || data.startsWith(':St') || data.startsWith(':Sg')) this.reply('1#');
+      || data.startsWith(':St') || data.startsWith(':Sg') || data === ':GG#') this.reply('1#');
     else if (data.startsWith(':Sr') || data.startsWith(':Sd')) this.reply('1#');
     else if (data === ':MS#') this.reply('0#');
     else if (data === ':D#') this.reply('#'); // monture à l'arrêt

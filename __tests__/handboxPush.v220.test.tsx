@@ -90,7 +90,7 @@ class FakeHandbox implements Transport {
   async write(data: string): Promise<void> {
     this.writes.push(data);
     if (data.startsWith(':SG') || data.startsWith(':SL') || data.startsWith(':SC')
-      || data.startsWith(':St') || data.startsWith(':Sg')) {this.reply('1#'); return;}
+      || data.startsWith(':St') || data.startsWith(':Sg') || data === ':GG#') {this.reply('1#'); return;}
     if (data === ':Ga#') {this.reply('+45:00#'); return;}
     if (data.startsWith(':ED#')) {this.render(); return;}
     if (data.startsWith(':EK')) {

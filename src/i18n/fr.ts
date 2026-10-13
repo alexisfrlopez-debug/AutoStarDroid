@@ -420,6 +420,7 @@ export const fr: Dict = {
     phoneData: 'Données téléphone', gps: 'Obtenir position GPS',
     syncPhone: 'Envoyer date/heure/site à la raquette',
     synced: 'Raquette mise à jour depuis le téléphone',
+    gpsDone: 'Position GPS acquise — coordonnées du site mises à jour',
     autoSync: 'Mise à jour auto de la raquette',
     autoSyncDesc: 'À chaque connexion : date, heure, fuseau et site du téléphone envoyés automatiquement à la raquette.',
     gpsPerm: 'Permission de localisation refusée — autorisez-la pour AutoStar Droid dans les réglages Android',

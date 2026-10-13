@@ -287,7 +287,7 @@ describe('v2.1.2 — mise à jour automatique de la raquette (date, heure, site)
   test('autoSyncScopeData : :SG/:SL/:SC/:St/:Sg envoyés + horloge raquette rafraîchie', async () => {
     const {client, tp} = await scriptClient();
     useSettingsStore.getState().setSite({name: 'Puy de Dôme', latDeg: 45.7733, lonDeg: 2.9671, elevM: 1100});
-    tp.script = ['1#', '1#', '1#', '1#', '1#']; // :SG :SL :SC :St :Sg répondent
+    tp.script = ['1#', '1#', '1#', '1#', '1#', '0#']; // :SG :SL :St :Sg :SC répondent + sonde :GG#
     await (client as any).autoSyncScopeData();
     expect(tp.writes.some((w) => w.startsWith(':SG'))).toBe(true);
     expect(tp.writes.some((w) => w.startsWith(':SL'))).toBe(true);
@@ -306,7 +306,7 @@ describe('v2.1.2 — mise à jour automatique de la raquette (date, heure, site)
 
   test('raquette muette : l\'envoi est toléré (aucun crash, commandes tout de même parties)', async () => {
     const {client, tp} = await scriptClient();
-    tp.script = [null, null, null, null, null]; // raquette muette
+    tp.script = [null, null, null, null, null, null]; // raquette muette
     await expect((client as any).autoSyncScopeData()).resolves.toBeUndefined();
     expect(tp.writes.filter((w) => w.startsWith(':S')).length).toBe(5);
   }, 15000);

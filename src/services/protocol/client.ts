@@ -1424,6 +1424,9 @@ export class AutostarClient implements DriverClient {
    *  en MODE PARC : la cible à l'horizon (Home alt-az = tube horizontal)
    *  serait refusée par le chemin direct :Sr/:Sd/:MS ET par la garde basse
    *  normale du relais (marge 2°). Sans point Home : repli :hP# (Meade).
+   *  v2.9.7 — À L'ARRIVÉE la raquette est SYNCHRONISÉE sur la position Home
+   *  recalculée (:Sr/:Sd/:CM#, comme alignToHome) : « toute information
+   *  validée dans l'appli synchronise automatiquement la raquette ».
    *  Renvoie le vecteur utilisé + le statut GOTO (UI = gotoErrorText). */
   async parkToHome(): Promise<{via: 'home' | 'handbox'; status: GotoStatus}> {
     const home = useTelemetryStore.getState().points.find((p) => p.home) ?? null;
@@ -1445,6 +1448,22 @@ export class AutostarClient implements DriverClient {
     try {
       const status = await this.gotoRaDecRelay(
         rd.raDeg, rd.decDeg, 'mute', new Date(), gen, {park: true});
+      // v2.9.7 — SYNC RAQUETTE À L'ARRIVÉE (« toute information validée dans
+      // l'appli synchronise automatiquement la raquette ») : comme
+      // alignToHome, le parc recalcule les AD/Dec de la position Home À
+      // L'ARRIVÉE (le ciel a tourné pendant le trajet) et les pose dans la
+      // raquette par :Sr/:Sd/:CM# — la raquette croit sincèrement être à la
+      // position Home : son affichage et ses pointages repartent de la
+      // position réelle, fini le désaccord raquette ↔ appli après un parc.
+      if (status === 'ok') {
+        const rd1 = altAzToRaDec(geo.altDeg, geo.azDeg, st.site.latDeg, st.site.lonDeg, new Date());
+        const syncOk = await this.syncRaDec(rd1.raDeg, rd1.decDeg).catch(() => false);
+        if (syncOk) {
+          this.log('info', 'PARC : raquette synchronisée sur la position Home — AD/Dec raquette = position réelle');
+        } else {
+          this.log('info', 'PARC : position Home atteinte, SYNC raquette muet/refusé — la raquette garde ses AD/Dec');
+        }
+      }
       return {via: 'home', status};
     } finally {
       this.cmdPhase = false;

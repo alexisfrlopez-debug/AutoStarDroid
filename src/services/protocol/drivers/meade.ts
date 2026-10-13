@@ -309,7 +309,21 @@ export const MEADE_DRIVER: MeadeDriver = {
   /** Envoie date/heure/site du téléphone vers la raquette. Les commandes
    *  :SG/:SL/:SC/:St/:Sg RÉPONDENT ("1") — la réponse est consommée (et
    *  tolérée si muette). CONVENTIONS MEADE (protocole révision 2010.10) :
-   *  :SG = UTC − local ; :Sg = longitude Est-NEGATIF. */
+   *  :SG = UTC − local ; :Sg = longitude Est-NEGATIF.
+   *
+   *  v2.9.7 — ORDRE CORRIGÉ (retour terrain : « la mise à jour date/heure/
+   *  site prend beaucoup de temps et l'interrogation échoue à donner
+   *  longitude/latitude »). CAUSE : après :SC (date), l'Autostar #49x envoie
+   *  « Updating Planetary Data » et recalcul ses éphémérides pendant
+   *  plusieurs secondes — TOUTE commande reçue dans cette fenêtre est
+   *  PERDUE. L'ancien ordre envoyait :St/:Sg (site) 400 ms après :SC, en
+   *  pleine fenêtre muette : le site n'atterrissait jamais dans la raquette
+   *  et la lecture :Gt#/:Gg# juste derrière donnait l'ancien site ou rien.
+   *  NOUVEAU : fuseau/heure/site D'ABORD, :SC en DERNIER, puis SONDE :GG#
+   *  (8 s max) qui revient dès que la raquette redevient disponible — le
+   *  texte « Updating Planetary Data# » est consommé entre-temps comme
+   *  réponse hors format. La raquette est APPLIQUÉE et DISPONIBLE dès le
+   *  retour : la lecture lon/lat juste après fonctionne. */
   async pushSite(c: DriverClient, latDeg: number, lonDeg: number): Promise<{time: string; date: string}> {
     const now = new Date();
     const tzOffsetMin = -now.getTimezoneOffset(); // standard : local − UTC (+120 France été)
@@ -330,15 +344,22 @@ export const MEADE_DRIVER: MeadeDriver = {
       const r = await c.cmd(cmdStr, timeoutMs, VALID.bit).catch(() => null);
       if (r === '0') rejected.push(cmdStr.slice(0, 3));
     };
+    // 1-4 : fuseau, horloge, SITE — AVANT :SC, jamais dans la fenêtre muette
     await send(`:SG${tzOffsetMin >= 0 ? '-' : '+'}${tzVal}#`, 2000);
     await sleep(120);
     await send(`:SL${hh}:${mm}:${ss}#`, 2000);
     await sleep(120);
-    await send(`:SC${mo}/${dd}/${yy}#`, 2500);
-    await sleep(400);
     await send(`:St${proto.decCmd(latDeg)}#`, 2000);
     await sleep(120);
     await send(`:Sg${proto.lonCmd(lonDeg)}#`, 2000);
+    await sleep(120);
+    // 5 : date EN DERNIER — c'est elle qui déclenche « Updating Planetary Data »
+    await send(`:SC${mo}/${dd}/${yy}#`, 2500);
+    await sleep(250); // laisse la fenêtre muette démarrer (le « 1 » de :SC précède)
+    // 6 : sonde — résolue dès que la raquette répond à nouveau ; le texte
+    // planétaire en attente est jeté (réponse hors format) par onData.
+    // Muette : .catch → push terminé, l'envoi manuel reste la référence.
+    await c.cmd(':GG#', 8000, VALID.tz).catch(() => null);
     if (rejected.length > 0) {
       c.warn(
         `Raquette : commandes refusées (${rejected.join(', ')}) — fuseau/site non appliqués, vérifiez Réglages`);

@@ -134,6 +134,8 @@ describe('v2.9.5 — parcToHome : le bouton PARC vise la Home de l\u2019onglet A
     (client as any).transport = tp;
     tp.onData((chunk) => (client as any).onData(chunk));
     const relaySpy = jest.spyOn(client as any, 'gotoRaDecRelay').mockResolvedValue('ok');
+    // v2.9.7 : le parc doit SYNCHRONISER la raquette sur la Home à l'arrivée
+    const syncSpy = jest.spyOn(client as any, 'syncRaDec').mockResolvedValue(true);
 
     useTelemetryStore.getState().setHomePoint({
       name: 'Home', raDeg: 0, decDeg: 0, altDeg: 0, azDeg: 0, quat: HOME_QUAT,
@@ -141,6 +143,7 @@ describe('v2.9.5 — parcToHome : le bouton PARC vise la Home de l\u2019onglet A
     const res = await client.parkToHome();
     expect(res).toEqual({via: 'home', status: 'ok'});
     expect(relaySpy).toHaveBeenCalledTimes(1);
+    expect(syncSpy).toHaveBeenCalledTimes(1); // SYNC raquette après arrivée
 
     // cible = géométrie Home (alt-az : alt 0°, az 0°) reconvertie MAINTENANT
     const [ra, dec, , , , opts] = relaySpy.mock.calls[0] as unknown as [
@@ -169,11 +172,13 @@ describe('v2.9.5 — parcToHome : le bouton PARC vise la Home de l\u2019onglet A
     const res = await client.parkToHome();
     expect(res.via).toBe('home');
     expect(res.status).toBe('ok');
-    // le relais a piloté les moteurs (pas de :Sr/:Sd/:MS direct en parc)
+    // le relais a piloté les moteurs (pas de :Sr/:Sd/:MS direct en parc —
+    // v2.9.7 : le SYNC d'arrivée :Sr/:Sd/:CM# ne part qu'APRÈS la convergence)
     expect(tp.writes).toContain(':RS#');
     expect(tp.writes).toContain(':Me#');
     expect(tp.writes.some((w) => w.startsWith(':MS'))).toBe(false);
-    expect(tp.writes.some((w) => w.startsWith(':Sr'))).toBe(false);
+    const iSr = tp.writes.findIndex((w) => w.startsWith(':Sr'));
+    expect(iSr).toBeGreaterThan(tp.writes.findIndex((w) => w === ':Me#')); // SYNC après arrivée
   }, 30000);
 
   test('sans point Home → repli parc raquette :hP# (Meade)', async () => {
