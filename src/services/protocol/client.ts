@@ -21,8 +21,8 @@ import {useSettingsStore} from '../../store/settingsStore';
 import {useScopeStore} from '../../store/scopeStore';
 import {useMotorCalibStore} from '../../store/motorCalibStore';
 import {
-  raDeltaDeg, relayDecision, relaySignWasWrong, relayAltBlocked,
-  type RelayRates, type RelaySigns,
+  raDeltaDeg, relayDecision, relaySignWasWrong, relayAltBlocked, relayLearnRate,
+  type RelayRates, type RelaySigns, type RelaySpeed,
 } from '../astro/gotorelay';
 import {DEFAULT_SKY_RATES} from '../astro/tracking';
 import {raDecToAltAz} from '../astro/coords';
@@ -817,14 +817,17 @@ export class AutostarClient implements DriverClient {
    *  vitesse demandée, sinon taux du PRESET de monture (v2.9.2 — le
    *  calibrage ne mesure qu'au taux center : le slew partait du défaut
    *  générique 2°/s au lieu des 4-5°/s réels d'une DS/ETX, d'où un GOTO
-   *  « en vitesse très lente »), sinon taux théoriques du ciel. */
+   *  « en vitesse très lente »), sinon taux théoriques du ciel.
+   *  NB : ces taux ne calent que la DURÉE des impulsions — la vitesse
+   *  PHYSIQUE vient de la commande de vitesse (setSpeed) ; l'apprentissage
+   *  relayLearned (v2.9.3) corrige en cours de GOTO une hypothèse fausse. */
   private relayRates(): RelayRates {
     const mc = useMotorCalibStore.getState();
     const st = useSettingsStore.getState();
     const preset = activePreset(
       st.mountBrandId, st.mountModelId, st.customMount,
       useScopeStore.getState().model, st.mountPreset);
-    const rateFor = (s: 'slew' | 'center'): number => {
+    const rateFor = (s: 'slew' | 'find' | 'center'): number => {
       if (mc.apply && mc.rates && mc.rates.speed === s) {
         const raMeas = mc.rates.e ?? mc.rates.w;
         const decMeas = mc.rates.n ?? mc.rates.s;
@@ -833,7 +836,45 @@ export class AutostarClient implements DriverClient {
       }
       return preset.expectedRates[s] ?? DEFAULT_SKY_RATES[s];
     };
-    return {slew: rateFor('slew'), center: rateFor('center')};
+    return {slew: rateFor('slew'), find: rateFor('find'), center: rateFor('center')};
+  }
+
+  /** Taux réels APPRIS pendant le relais (v2.9.3) — EMA par vitesse et par
+   *  axe (arc parcouru ÷ durée commandée). Vide à chaque nouveau relais. */
+  private relayLearned: Partial<Record<RelaySpeed, {ra: number | null; dec: number | null}>> = {};
+  /** Taux déjà journalisés pour ce relais (une seule ligne par vitesse). */
+  private relayLearnLogged = new Set<RelaySpeed>();
+
+  /** Alimente l'apprentissage d'un axe (v2.9.3). */
+  private relayLearn(speed: RelaySpeed, axis: 'ra' | 'dec', movedDeg: number, pulseS: number, assumed: number) {
+    const cur = this.relayLearned[speed] ?? {ra: null, dec: null};
+    const v = relayLearnRate(axis === 'ra' ? cur.ra : cur.dec, movedDeg, pulseS, assumed);
+    if (axis === 'ra') cur.ra = v; else cur.dec = v;
+    this.relayLearned[speed] = cur;
+    const cands = [cur.ra, cur.dec].filter((x): x is number => x != null);
+    const m = Math.min(...cands);
+    if (!this.relayLearnLogged.has(speed) && cands.length > 0 &&
+        (m < assumed * 0.6 || m > assumed * 1.6)) {
+      this.relayLearnLogged.add(speed);
+      useScopeStore.getState().pushLog('info',
+        `RELAIS : taux réel ${speed === 'slew' ? 'slew' : speed} ≈ ${m.toFixed(2)}°/s ` +
+        `(hypothèse ${assumed.toFixed(2)}°/s) — impulsions recalées`);
+    }
+  }
+
+  /** Taux pour la décision : valeur APPRISE de l'axe si disponible,
+   *  sinon hypothèse (preset/calibrage). Les axes appris diffèrent d'un
+   *  axe à l'autre (jeu mécanique) — le MIN est le plus prudent : il
+   *  allonge l'impulsion de l'axe lent plutôt que de dépasser. */
+  private relayRatesOf(base: RelayRates): RelayRates {
+    const mix = (s: RelaySpeed): number => {
+      const l = this.relayLearned[s];
+      const cands = [base[s]];
+      if (l?.ra != null) cands.push(l.ra);
+      if (l?.dec != null) cands.push(l.dec);
+      return Math.min(...cands);
+    };
+    return {slew: mix('slew'), find: mix('find'), center: mix('center')};
   }
 
   /** Signes du relais : apprentissage persisté du calibrage si actif. */
@@ -912,21 +953,26 @@ export class AutostarClient implements DriverClient {
     this.ownMoveUntil = Date.now() + 300000; // tout le mouvement = l'app
     this.notifyGotoStart(); // contrôle croisé armé (v2.3.0)
     const signs = this.relaySigns();
-    const rates = this.relayRates();
+    const ratesBase = this.relayRates();
+    this.relayLearned = {}; // apprentissage reparti à zéro à chaque relais
+    this.relayLearnLogged.clear();
+    log(`RELAIS : taux présumés slew ${ratesBase.slew.toFixed(2)}°/s · find ${
+      ratesBase.find.toFixed(2)}°/s · center ${ratesBase.center.toFixed(2)}°/s ` +
+      `(monture ${preset.label} — recalés en cours de pointage)`);
     const startedAt = Date.now();
     const MAX_MS = 210000;
     // reste d'arc d'un axe après impulsion (raccord 0 h pour l'AD)
     const remainRaOf = (ra: number) => raDeltaDeg(ra, raDeg);
     const remainDecOf = (dec: number) => dec - decDeg;
     const stalledStreak = {ra: 0, dec: 0};
-    let lastSpeed: 'slew' | 'center' | null = null;
     let iterations = 0;
     try {
-      while (Date.now() - startedAt < MAX_MS && this.isConnected() && iterations < 90) {
+      while (Date.now() - startedAt < MAX_MS && this.isConnected() && iterations < 150) {
         // v2.9.2 : annulation (bouton ARRÊTER ou nouveau GOTO) — vérifiée à
         // CHAQUE itération, avant toute commande moteur
         if (gen !== this.relayGen) return await this.relayAbortExit();
         iterations += 1;
+        const rates = this.relayRatesOf(ratesBase);
         const d = relayDecision({
           raDeg: pos.raDeg, decDeg: pos.decDeg,
           targetRaDeg: raDeg, targetDecDeg: decDeg,
@@ -939,10 +985,12 @@ export class AutostarClient implements DriverClient {
           this.watchSlewEnd(); // suivi de fin + notif d'arrivée (v2.2.0)
           return 'ok';
         }
-        if (d.speed !== lastSpeed) {
-          lastSpeed = d.speed;
-          await this.setSpeed(d.speed).catch(() => undefined);
-        }
+        // v2.9.3 : vitesse DEMANDÉE À CHAQUE itération — la commande est
+        // idempotente et courte ; une seule perdue (tampon UART minuscule
+        // des #49x, retentative avalée) laissait la monture au taux
+        // PRÉCÉDENT (center/guide du suivi ou du réglage fin) et toute la
+        // séquence rampant (« le goto se lance mais en vitesse très lente »)
+        await this.setSpeed(d.speed).catch(() => undefined);
         const before = {ra: d.remainRaDeg, dec: d.remainDecDeg};
         const raMs = Math.round(d.raS * 1000);
         const decMs = Math.round(d.decS * 1000);
@@ -1022,6 +1070,16 @@ export class AutostarClient implements DriverClient {
             this.ownMoveUntil = Date.now() + 1200;
             return 'relayPartial';
           }
+          // v2.9.3 : apprentissage du taux RÉEL par axe — l'hypothèse
+          // (preset/calibrage) ne cale que les durées ; un écart ×10 se
+          // voit ici et recalcule les impulsions suivantes (arc mesuré
+          // AVANT la mise à jour de la position !)
+          if (d.dirs.raDir && d.raS >= 0.12 && next.raDeg != null) {
+            this.relayLearn(d.speed, 'ra', Math.abs(newRa - pos.raDeg), d.raS, ratesBase[d.speed]);
+          }
+          if (d.dirs.decDir && d.decS >= 0.12 && next.decDeg != null) {
+            this.relayLearn(d.speed, 'dec', Math.abs(newDec - pos.decDeg), d.decS, ratesBase[d.speed]);
+          }
           pos.raDeg = newRa;
           pos.decDeg = newDec;
           // garde butées CONTINUE (v2.9.2) : la position s'évalue en altitude
@@ -1045,7 +1103,7 @@ export class AutostarClient implements DriverClient {
       this.ownMoveUntil = Date.now() + 1200;
       const fin = relayDecision({
         raDeg: pos.raDeg, decDeg: pos.decDeg, targetRaDeg: raDeg, targetDecDeg: decDeg,
-        signs, rates, maxPulseS: 6,
+        signs, rates: this.relayRatesOf(ratesBase), maxPulseS: 6,
       });
       const remainArc = Math.max(Math.abs(fin.remainRaDeg), Math.abs(fin.remainDecDeg));
       logErr(`RELAIS : cible approchée à ${(remainArc * 60).toFixed(0)}' mais hors tolérance (${

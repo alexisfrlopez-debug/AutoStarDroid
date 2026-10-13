@@ -86,8 +86,10 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
     private const val MAX_READ_ERRORS = 40
     private const val LUMA_W = 192
     private const val LUMA_H = 144
-    /** Octets de la structure PROBE/COMMIT demandés si GET_LEN échoue. */
-    private const val PROBE_LEN_FALLBACK = 26
+    /** Longueurs PROBE/COMMIT essayées en repli : 26 = UVC 1.0/1.1,
+     *  34/48 = firmwares étendus / UVC 1.5 — un SET_CUR à la mauvaise
+     *  longueur est STALLÉ par la caméra (« PROBE refusé »). */
+    private val PROBE_LENS_FALLBACK = intArrayOf(26, 34, 48)
     /** ISO — microtrames par requête et requêtes en vol (anneau). */
     private const val ISO_PACKETS_PER_REQ = 32
     private const val ISO_REQ_COUNT = 8
@@ -152,6 +154,10 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
   private var controlUnitCt = 0
   private var vcIfNum = 0
   private var vsIfNum = 0
+  /** Interface VS portant le contrôle probe/commit (v2.9.3) : l'interface VS
+   *  du parsing par défaut — le repli peut BASCULER sur l'interface porteuse
+   *  du scan SDK si celle-ci seule accepte la négociation. */
+  private var vsCtrlIfNum = 0
 
   private val permReceiver = object : BroadcastReceiver() {
     override fun onReceive(ctx: Context, intent: Intent) {
@@ -421,16 +427,16 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
   /*   Unité (PU/CT)       : wIndex = (unitId << 8) | interface VC   */
   /* ------------------------------------------------------------ */
 
-  /** GET sur l'interface VS (probe) — wIndex = vsIfNum. */
+  /** GET sur l'interface VS (probe) — wIndex = vsCtrlIfNum (v2.9.3). */
   private fun ctrlGetVs(conn: UsbDeviceConnection, cs: Int, req: Int, len: Int): ByteArray? {
     val buf = ByteArray(len)
-    val n = conn.controlTransfer(0xA1, req, (cs shl 8) and 0xFFFF, vsIfNum and 0xFF, buf, len, 300)
+    val n = conn.controlTransfer(0xA1, req, (cs shl 8) and 0xFFFF, vsCtrlIfNum and 0xFF, buf, len, 300)
     return if (n == len) buf else null
   }
 
-  /** SET sur l'interface VS (probe/commit) — wIndex = vsIfNum. */
+  /** SET sur l'interface VS (probe/commit) — wIndex = vsCtrlIfNum. */
   private fun ctrlSetVs(conn: UsbDeviceConnection, cs: Int, data: ByteArray): Boolean {
-    return conn.controlTransfer(0x21, 0x01, (cs shl 8) and 0xFFFF, vsIfNum and 0xFF, data, data.size, 300) == data.size
+    return conn.controlTransfer(0x21, 0x01, (cs shl 8) and 0xFFFF, vsCtrlIfNum and 0xFF, data, data.size, 300) == data.size
   }
 
   /** GET sur une unité (PU/CT) — wIndex = (unitId << 8) | vcIfNum. */
@@ -481,6 +487,7 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
       if (desc.vsIfNum < 0) { conn.close(); return promise.reject("UVC", "Interface VideoStreaming absente") }
       vcIfNum = desc.vcIfNum
       vsIfNum = desc.vsIfNum
+      vsCtrlIfNum = desc.vsIfNum // probe/commit : interface VS du parsing (le repli peut basculer)
       controlUnitPu = desc.puId
       controlUnitCt = desc.ctId
       // Interface PORTEUSE des endpoints — distincte de vsIfNum (contrôle)
@@ -574,19 +581,76 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
       }
       val isoMode = bulkEpDesc == null
 
-      // négociation PROBE — on PART de la négociation courante (GET_CUR
-      // préremplit dwMaxVideoFrameSize/payload et les champs version :
-      // certains firmwares refusent une structure tout-zéro)
-      val probeLen = ctrlGetLen(conn)
-      val probe = (ctrlGetVs(conn, CS_PROBE, 0x81, probeLen) ?: ByteArray(probeLen)).copyOf()
-      probe[2] = format.index.toByte()
-      probe[3] = frame.index.toByte()
-      putLe32(probe, 4, intervalVal)
-      if (!ctrlSetVs(conn, CS_PROBE, probe)) {
-        conn.close(); return promise.reject("UVC", "PROBE refusé par la caméra")
+      // négociation PROBE — ÉCHELLE DE REPLI (v2.9.3, « PROBE refusé par
+      // la caméra ») : un SET_CUR unique ne suffit pas, les firmwares UVC
+      // sont capricieux — et un refus EP0 s'EFFACE TOUT SEUL au SETUP
+      // suivant (STALL auto-clear), donc réessayer est sans danger :
+      //  1. LONGUEUR : GET_LEN (0x85) d'abord ; s'il échoue, 26 (UVC
+      //     1.0/1.1), 34 et 48 (firmwares étendus/UVC 1.5) — un SET_CUR à
+      //     la mauvaise longueur est STALLÉ.
+      //  2. BASE : GET_CUR prérempli (certains firmwares refusent une
+      //     structure tout-zéro) PUIS structure canonique propre — le
+      //     prérempli peut AUSSI être refusé (état interne douteux).
+      //  3. INTERFACE : le contrôle va sur l'interface VS du parsing
+      //     (spec UVC) ; si elle refuse tout, retenter sur l'interface
+      //     PORTEUSE du scan SDK (epIfNum) — des descripteurs exotiques
+      //     déclarent la VS ailleurs.
+      var probeLen = -1
+      var got: ByteArray? = null
+      val triedLens = LinkedHashSet<Int>()
+      var curOk = 0
+      val ctrlIfs = LinkedHashSet<Int>()
+      ctrlIfs.add(desc.vsIfNum)
+      if (epIfNum != desc.vsIfNum) ctrlIfs.add(epIfNum)
+      probeLoop@ for (ifc in ctrlIfs) {
+        vsCtrlIfNum = ifc
+        // claim best-effort de l'interface (alt 0) — même précaution que
+        // libuvc ; sans effet si le noyau la référence déjà
+        for (k in 0 until dev.interfaceCount) {
+          val f = dev.getInterface(k)
+          if (f.id == ifc && f.alternateSetting == 0) {
+            try { conn.claimInterface(f, false) } catch (_: Exception) {}
+            break
+          }
+        }
+        val lens = ArrayList<Int>()
+        ctrlGetLen(conn)?.let { lens.add(it) }
+        for (c in PROBE_LENS_FALLBACK) if (!lens.contains(c)) lens.add(c)
+        for (len in lens) {
+          triedLens.add(len)
+          val base = ctrlGetVs(conn, CS_PROBE, 0x81, len)
+          if (base != null) curOk += 1
+          val cands = ArrayList<ByteArray>(2)
+          if (base != null) cands.add(base.copyOf())
+          cands.add(ByteArray(len))
+          for (cand in cands) {
+            cand[2] = format.index.toByte()
+            cand[3] = frame.index.toByte()
+            if (len >= 8) putLe32(cand, 4, intervalVal)
+            if (ctrlSetVs(conn, CS_PROBE, cand)) {
+              probeLen = len
+              // GET_CUR post-SET ×3 — certains firmwares répondent au 2e tour
+              for (t in 0 until 3) {
+                got = ctrlGetVs(conn, CS_PROBE, 0x81, len)
+                if (got != null) break
+              }
+              if (got != null) break@probeLoop
+            }
+          }
+        }
       }
-      val got = ctrlGetVs(conn, CS_PROBE, 0x81, probeLen)
-          ?: run { conn.close(); return promise.reject("UVC", "PROBE GET_CUR échoué") }
+      if (got == null) {
+        conn.close()
+        return promise.reject("UVC",
+            if (probeLen >= 0)
+              "PROBE accepté (len=%d) mais GET_CUR muet (curOK=%d, fmt=%d, frame=%d, interval=%d, ifVS=%d, epIf=%d)"
+                  .format(Locale.US, probeLen, curOk, format.index, frame.index,
+                      intervalVal, desc.vsIfNum, epIfNum)
+            else
+              "PROBE refusé par la caméra (lens=%s, curOK=%d, fmt=%d, frame=%d, interval=%d, ifVS=%d, epIf=%d)"
+                  .format(Locale.US, triedLens.joinToString(","), curOk, format.index, frame.index,
+                      intervalVal, desc.vsIfNum, epIfNum))
+      }
       // ⚠️ offsets VS_PROBE_CONTROL : dwMaxVideoFrameSize à 18,
       // dwMaxPayloadTransferSize à 22 (v2.8.0 lisait 20/24 — décalés)
       val maxFrameBytes = le32(got, 18)
@@ -687,7 +751,10 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
       }
 
       if (!ctrlSetVs(conn, CS_COMMIT, commit)) {
-        conn.close(); return promise.reject("UVC", "COMMIT refusé par la caméra")
+        conn.close()
+        return promise.reject("UVC",
+            "COMMIT refusé par la caméra (len=%d, curOK=%d, ifVS=%d, epIf=%d)"
+                .format(Locale.US, commit.size, curOk, vsCtrlIfNum, epIfNum))
       }
 
       // état
@@ -749,15 +816,18 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
     }
   }
 
-  private fun ctrlGetLen(conn: UsbDeviceConnection): Int {
+  /** GET_LEN de la structure probe/commit — null si la caméra ne répond
+   *  pas ou renvoie une longueur invraisemblable (le repli essaye alors
+   *  26/34/48 : un SET_CUR à la mauvaise longueur est STALLÉ). */
+  private fun ctrlGetLen(conn: UsbDeviceConnection): Int? {
     val buf = ByteArray(2)
     val n = conn.controlTransfer(0xA1, 0x85, (CS_PROBE shl 8) and 0xFFFF,
-        vsIfNum and 0xFF, buf, 2, 300)
+        vsCtrlIfNum and 0xFF, buf, 2, 300)
     if (n == 2) {
       val v = (buf[0].toInt() and 0xFF) or ((buf[1].toInt() and 0xFF) shl 8)
       if (v in 26..64) return v
     }
-    return PROBE_LEN_FALLBACK
+    return null
   }
 
   private fun putLe32(b: ByteArray, off: Int, v: Int) {

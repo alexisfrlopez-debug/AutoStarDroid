@@ -79,12 +79,14 @@ describe('v2.5.0 — GOTO RELAIS en boucle fermée (fin de la déconnexion au GO
     ({client, tp} = await connectedClient());
     // chemin direct : :Sr haute précision refusée, basse précision refusée
     // relais : position (AD 6h00 = 90°, DEC +20*00) → cible (AD 100°, DEC 20°)
+    // v2.9.3 : setSpeed à CHAQUE itération + doublon :RS#/:R9# → 4 écritures
+    // par itération (RS, R9, Me, Qe)
     tp.script = [
       '0#', '0#',                       // :Sr refusé ×2 → 'refused' → relais
       '06:00:00#', '+20*00#',           // position initiale : AD 90°, DEC 20°
-      null, null, null,                 // :RS# (vitesse), :Me# (impulsion), :Qe# (stop)
+      null, null, null, null,           // :RS#, :R9#, :Me#, :Qe#
       '06:24:00#', '+20*00#',           // relecture : AD 96° (reste 4°)
-      null, null,                       // :Me#, :Qe# (2e impulsion, 0,64 s)
+      null, null, null, null,           // 2e itération : :RS#, :R9#, :Me#, :Qe#
       '06:40:00#', '+20*00#',           // relecture : AD 100° = cible → done
       null, null,                       // :Q# (stopAll) ×2 (done + finally)
     ];
@@ -92,6 +94,8 @@ describe('v2.5.0 — GOTO RELAIS en boucle fermée (fin de la déconnexion au GO
     expect(r).toBe('ok');
     // les commandes du relais sont passées par là
     expect(tp.writes).toContain(':RS#');       // vitesse slew
+    expect(tp.writes).toContain(':R9#');       // doublon Autostar v2.9.3
+    expect(tp.writes.filter((w) => w === ':RS#').length).toBe(2); // à CHAQUE itération
     expect(tp.writes.filter((w) => w === ':Me#').length).toBe(2); // 2 impulsions Est
     expect(tp.writes.filter((w) => w === ':Qe#').length).toBe(2); // stop individuel
     expect(tp.writes.filter((w) => w === ':Q#').length).toBe(2);  // stopAll ×2
@@ -102,12 +106,14 @@ describe('v2.5.0 — GOTO RELAIS en boucle fermée (fin de la déconnexion au GO
   test('RELAIS : position figée malgré les impulsions (butée) → relayPartial', async () => {
     ({client, tp} = await connectedClient());
     // cible AD 100° jamais atteinte : la relecture renvoie TOUJOURS 90°
+    // v2.9.3 : 4 écritures par itération (RS, R9, Me, Qe) — l'apprentissage
+    // ne s'applique pas (arc mesuré sous le bruit : valeur précédente)
     tp.script = [
       '0#', '0#',                       // :Sr refusé ×2 → relais
       '06:00:00#', '+20*00#',           // position initiale
-      null, null, null, '06:00:00#', '+20*00#',  // impulsion 1 : rien ne bouge
-      null, null, '06:00:00#', '+20*00#',        // impulsion 2 : figé (streak 2)
-      null, null, '06:00:00#', '+20*00#',        // impulsion 3 : figé (streak 3)
+      null, null, null, null, '06:00:00#', '+20*00#',  // impulsion 1 : rien ne bouge
+      null, null, null, null, '06:00:00#', '+20*00#',  // impulsion 2 : figé (streak 2)
+      null, null, null, null, '06:00:00#', '+20*00#',  // impulsion 3 : figé (streak 3)
       null, null,                       // :Q# ×2
     ];
     const r = await client.gotoRaDec(100, 20);

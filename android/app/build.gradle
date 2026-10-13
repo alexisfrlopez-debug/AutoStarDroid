@@ -21,8 +21,8 @@ android {
         applicationId "com.autostardroid"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 35
-        versionName "2.9.2"
+        versionCode 36
+        versionName "2.9.3"
     }
     // Compat ROMs exotiques (DokeOS, etc.) : extraction des .so à l'installation.
     // Certaines ROMs échouent au dlopen des libs non compressées du APK

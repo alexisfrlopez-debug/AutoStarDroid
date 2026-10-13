@@ -17,15 +17,16 @@
  * AutostarClient.gotoRaDecRelay (client.ts) et n'utilise que des Promise.
  */
 
-export type RelaySpeed = 'slew' | 'center';
+export type RelaySpeed = 'slew' | 'find' | 'center';
 
 /** Signes moteurs : +1 = :Me augmente l'AD et :Mn augmente la DEC. */
 export interface RelaySigns {ra: 1 | -1; dec: 1 | -1}
 
-/** Taux sur le ciel par vitesse (deg/s) — mesurés au calibrage si dispo.
+/** Taux sur le ciel par vitesse (deg/s) — mesurés au calibrage si dispo,
+ *  sinon preset de monture, sinon taux théoriques.
  *  (pas de palier « guide » : le taux sidéral rendrait la fin de course
  *  interminable — le relais termine au taux center, précision ~7′ visée). */
-export interface RelayRates {slew: number; center: number}
+export interface RelayRates {slew: number; find: number; center: number}
 
 export interface RelayInput {
   /** Position courante (deg). */
@@ -63,8 +64,14 @@ export interface RelayDecision {
 
 /** Sous ce reste d'arc TOTAL (deg) la cible est atteinte (~7′ d'arc). */
 export const RELAY_TOLERANCE_DEG = 0.12;
-/** Passage slew → center en dessous de ce reste (deg). */
-export const RELAY_SLOW_AT_DEG = 2.5;
+/** Passage slew → find en dessous de ce reste (deg). AVANT v2.9.3 le relais
+ *  passait DIRECTEMENT au taux center (0,05°/s !) sous 2,5° — les derniers
+ *  degrés rampaient pendant ~45 s, et une cible d'entrée < 2,5° rampait de
+ *  bout en bout (« le goto est toujours lent quand il se lance »). */
+export const RELAY_FIND_AT_DEG = 2.0;
+/** Passage find → center en dessous de ce reste (deg) — la course lente ne
+ *  concerne plus que la fraction finale (< ~8 s au taux center d'un DS). */
+export const RELAY_CENTER_AT_DEG = 0.4;
 /** Amortissement : on commande 80 % de l'arc pour ne pas rerfresher. */
 export const RELAY_DAMPING = 0.8;
 /** Un reste sous ce seuil est considéré NUL (bruit de lecture ±). */
@@ -92,9 +99,11 @@ export function relayRemainders(
   return {remainRaDeg, remainDecDeg};
 }
 
-/** Vitesse du relais selon le reste d'arc le plus grand. */
+/** Vitesse du relais selon le reste d'arc le plus grand — TROIS paliers
+ *  (v2.9.3) : slew (>2°), find (0,4…2°), center (<0,4°). */
 export function relaySpeedFor(maxRemainAbsDeg: number): RelaySpeed {
-  return maxRemainAbsDeg >= RELAY_SLOW_AT_DEG ? 'slew' : 'center';
+  return maxRemainAbsDeg >= RELAY_FIND_AT_DEG ? 'slew'
+    : maxRemainAbsDeg >= RELAY_CENTER_AT_DEG ? 'find' : 'center';
 }
 
 /**
@@ -113,7 +122,7 @@ export function relayDecision(inp: RelayInput): RelayDecision {
   if (maxRemain <= RELAY_TOLERANCE_DEG) {
     return {done: true, speed: 'center', raS: 0, decS: 0, dirs: {raDir: null, decDir: null}, remainRaDeg, remainDecDeg};
   }
-  const speed = relaySpeedFor(maxRemain);
+  let speed = relaySpeedFor(maxRemain);
   let rate = inp.rates[speed];
   let timeRa = absRa > 0 ? (absRa * RELAY_DAMPING) / rate : Infinity;
   let timeDec = absDec > 0 ? (absDec * RELAY_DAMPING) / rate : Infinity;
@@ -124,8 +133,11 @@ export function relayDecision(inp: RelayInput): RelayDecision {
   // AUCUN axe ne participe à cette vitesse (restes minuscules) : on repasse
   // au taux CENTER — l'impulsion minimum y ne dépasse la cible que de
   // ~0,01° (36″), sans danger. Les durées sont alors resserrées sur les
-  // restes réels, plafonnées comme toujours.
+  // restes réels, plafonnées comme toujours. La vitesse SIGNALÉE devient
+  // aussi 'center' (v2.9.3) : la raquette doit être AU taux dont les
+  // durées supposent — sinon les impulsions sous-tirent de 50×.
   if (raDir === null && decDir === null) {
+    speed = 'center';
     rate = inp.rates.center;
     timeRa = absRa > 0 ? Math.max((absRa * RELAY_DAMPING) / rate, RELAY_MIN_PULSE_S) : 0;
     timeDec = absDec > 0 ? Math.max((absDec * RELAY_DAMPING) / rate, RELAY_MIN_PULSE_S) : 0;
@@ -157,6 +169,27 @@ export function relaySignWasWrong(remainBeforeDeg: number, remainAfterDeg: numbe
 /** Le mouvement est-il STALLÉ ? (impulsion commandée, position figée ×n) */
 export function relayStalled(pulseCommanded: boolean, positionMovedDeg: number, consecutive: number): boolean {
   return pulseCommanded && positionMovedDeg < RELAY_DEADBAND_DEG && consecutive >= 3;
+}
+
+/**
+ * Apprentissage ADAPTATIF du taux réel (v2.9.3) : après chaque impulsion,
+ * taux observé = arc réellement parcouru ÷ durée commandée. L'hypothèse
+ * (preset/calibrage) peut être fausse de ×10 — le preset ne fait que la
+ * DURÉE des impulsions, pas la vitesse physique : une hypothèse trop haute
+ * découpe le déplacement en micro-itérations, trop basse fait dépasser.
+ * EMA 50 %, observation bornée à ±4× l'hypothèse (une lecture pendant
+ * l'inertie ou un capteur farfelu ne détruit pas le calage). Arc trop
+ * petit pour conclure (stalle, bruit) → on garde la valeur précédente.
+ */
+export function relayLearnRate(
+  prev: number | null, movedDeg: number, pulseS: number, assumed: number,
+): number {
+  if (pulseS < RELAY_MIN_PULSE_S) return prev ?? assumed;
+  if (movedDeg < RELAY_DEADBAND_DEG) return prev ?? assumed;
+  const raw = movedDeg / pulseS;
+  const obs = Math.min(assumed * 4, Math.max(assumed / 4, raw));
+  const learned = prev == null ? obs : prev * 0.5 + obs * 0.5;
+  return Math.min(15, Math.max(0.01, learned));
 }
 
 /* ------------------------------------------------------------------ */

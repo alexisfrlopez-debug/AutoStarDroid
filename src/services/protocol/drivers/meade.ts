@@ -199,7 +199,17 @@ export const MEADE_DRIVER: MeadeDriver = {
   },
 
   async setSpeed(c: DriverClient, s: Speed): Promise<void> {
+    // v2.9.3 — DOUBLON DE FAMILLE pour slew/find : :RS#/:RM# (famille LX200
+    // classique) ET :R9#/:R4# (niveaux explicites Autostar 1-9). Les #49x
+    // acceptent les DEUX familles, LX200 classique ignore :Rn# — le doublon
+    // garantit le taux voulu même si l'une des deux est avalée par le
+    // tampon UART minuscule (une vitesse perdue = la monture reste au taux
+    // précédent — center/guide du suivi — et TOUT le GOTO rampe).
+    // 'center'/'guide' restent en simple : leur taux est MESURÉ au calibrage
+    // avec :RC#/:RG# — ne pas décaler la mécanique mesurée.
     await c.cmdSilent(SPEED_CMDS[s]);
+    if (s === 'slew') { await sleep(30); await c.cmdSilent(':R9#'); }
+    else if (s === 'find') { await sleep(30); await c.cmdSilent(':R4#'); }
   },
 
   async startMove(c: DriverClient, dir: Dir): Promise<void> {
