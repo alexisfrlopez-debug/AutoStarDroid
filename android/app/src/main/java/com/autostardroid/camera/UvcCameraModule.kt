@@ -727,8 +727,13 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
       }
       // ⚠️ offsets VS_PROBE_CONTROL : dwMaxVideoFrameSize à 18,
       // dwMaxPayloadTransferSize à 22 (v2.8.0 lisait 20/24 — décalés)
-      val maxFrameBytes = le32(got, 18)
-      val maxPayload = le32(got, 22)
+      // v2.9.8 — GARDE BORNES : la v2.9.6 accepte les réponses GET_CUR
+      // COURTES (wLength = un maximum) ; un firmware répondant moins de
+      // 26 octets rendait ces lectures HORS BORNES (ArrayIndexOutOfBounds
+      // → rejet « OPEN » cryptique). Zéro = repli sur les descripteurs
+      // (déjà prévu plus bas pour le cap et la taille ISO).
+      val maxFrameBytes = if (got.size >= 26) le32(got, 18) else 0
+      val maxPayload = if (got.size >= 26) le32(got, 22) else 0
       val commit = got.copyOf()
 
       // interface + endpoint + alternate setting porteur
@@ -821,7 +826,8 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
               "Allocation USB impossible (${altErr ?: "aucun alternate setting"})")
         }
         // la caméra doit connaître la bande allouée par l'hôte
-        if (maxPayload <= 0) putLe32(commit, 22, chosenActualPacket)
+        // (garde v2.9.8 : commit court < 26 octets → pas d'écriture hors bornes)
+        if (maxPayload <= 0 && commit.size >= 26) putLe32(commit, 22, chosenActualPacket)
       }
 
       if (!ctrlSetVs(conn, CS_COMMIT, commit)) {
@@ -839,7 +845,16 @@ class UvcCameraModule(reactContext: ReactApplicationContext) :
       isMjpeg = format.mjpeg
       expectedFrame = if (!isMjpeg && maxFrameBytes in 1..(32 * 1024 * 1024)) maxFrameBytes else 0
       jpegQuality = quality.coerceIn(40, 95)
-      frameSkip = if (fpsMax >= 30) 1 else maxOf(1, 30 / maxOf(1, fpsMax))
+      // v2.9.8 — frameSkip depuis la cadence NÉGOCIÉE (intervalVal) :
+      // l'ouverture EXPLICITE (openUvcStreamEx — résolution/cadence choisies
+      // dans l'app) arrive ici avec fpsMax = 0 → l'ancienne formule
+      // « 30 / maxOf(1, fpsMax) » valait 30 : UNE frame sur 30 atteignait
+      // l'aperçu (figé) quelle que soit la cadence choisie. Cible : fpsMax
+      // s'il est demandé (mode auto), sinon la cadence choisie elle-même
+      // (mode explicite — sauter des frames n'a pas de sens).
+      val negotiatedFps = 10_000_000.0 / intervalVal
+      val targetFps = if (fpsMax in 1..119) fpsMax.toDouble() else negotiatedFps
+      frameSkip = maxOf(1, Math.round(negotiatedFps / targetFps).toInt())
       frameCount = 0
       val cap = if (maxFrameBytes in 1..(32 * 1024 * 1024)) maxFrameBytes else frame.w * frame.h * 2
       acc = ByteArray(maxOf(cap, 96 * 1024))
